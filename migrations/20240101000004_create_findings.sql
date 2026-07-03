@@ -1,5 +1,5 @@
 -- findings
-CREATE TABLE findings (
+CREATE TABLE IF NOT EXISTS findings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     audit_id UUID NOT NULL REFERENCES audits(id) ON DELETE CASCADE,
     tenant_id UUID NOT NULL REFERENCES tenants(id),
@@ -12,5 +12,5 @@ CREATE TABLE findings (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_findings_audit ON findings(audit_id);
-CREATE INDEX idx_findings_vuln_class ON findings(vuln_class);
+CREATE INDEX IF NOT EXISTS idx_findings_audit ON findings(audit_id);
+CREATE INDEX IF NOT EXISTS idx_findings_vuln_class ON findings(vuln_class);

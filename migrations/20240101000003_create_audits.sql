@@ -1,5 +1,5 @@
 -- audits
-CREATE TABLE audits (
+CREATE TABLE IF NOT EXISTS audits (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     contract_id UUID NOT NULL REFERENCES contracts(id),
@@ -13,4 +13,4 @@ CREATE TABLE audits (
     completed_at TIMESTAMPTZ
 );
 
-CREATE INDEX idx_audits_tenant_status ON audits(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_audits_tenant_status ON audits(tenant_id, status);

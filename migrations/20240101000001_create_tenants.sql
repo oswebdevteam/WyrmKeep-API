@@ -1,5 +1,5 @@
 -- tenants
-CREATE TABLE tenants (
+CREATE TABLE IF NOT EXISTS tenants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL UNIQUE,
     api_key_hash TEXT NOT NULL,
