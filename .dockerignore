@@ -1,0 +1,11 @@
+target/
+.git/
+.env
+.env.local
+*.log
+*.db
+Secrets.toml
+Secrets.dev.toml
+README.md
+DEPLOYMENT.md
+CHANGELOG.md
