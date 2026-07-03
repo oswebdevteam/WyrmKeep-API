@@ -10,17 +10,6 @@
 
 </div>
 
----
-
-##  Table of Contents
-
-- [Overview](#overview)
-- [Features](#features)
-- [Architecture](#architecture)
-- [Quick Start](#quick-start)
-- [API Documentation](#api-documentation)
-- [Configuration](#configuration)
-- [Development] (#development)
 
 ---
 
