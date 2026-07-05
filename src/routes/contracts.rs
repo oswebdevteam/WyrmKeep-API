@@ -79,7 +79,7 @@ pub async fn upload_contract(
         StatusCode::CREATED,
         Json(ContractResponse {
             data: row.into(),
-            request_id: Uuid::new_v4().to_string(), // In reality, we'd extract from Request parts
+            request_id: Uuid::new_v4().to_string(),
         }),
     ))
 }

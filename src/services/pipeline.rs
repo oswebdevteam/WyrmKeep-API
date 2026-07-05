@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+#[allow(unused_imports)]
 use crate::models::audit::{AuditJob, AuditReport, AuditStatus};
 use crate::models::finding::FindingSeverity;
 use crate::services::pattern::PatternAbstractor;
@@ -21,8 +22,8 @@ impl AuditPipeline {
         
         // Helper to emit events if there is a listener
         let emit_event = |event: AuditEvent| {
-            if let Some(sender) = self.state.audit_events.get(&audit_id) {
-                let _ = sender.send(event);
+            if let Some(sender_ref) = self.state.audit_events.get(&audit_id) {
+                let _ = sender_ref.value().send(event);
             }
         };
 

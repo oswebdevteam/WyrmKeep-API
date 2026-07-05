@@ -112,7 +112,7 @@ pub async fn get_causal_chain(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let chain = sqlx::query_scalar!(
+    let chain: Option<serde_json::Value> = sqlx::query_scalar!(
         "SELECT causal_chain FROM findings WHERE id = $1 AND tenant_id = $2",
         id,
         auth.tenant_id

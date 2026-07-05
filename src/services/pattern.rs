@@ -20,7 +20,7 @@ impl PatternAbstractor {
         patterns
     }
 
-    fn extract_pattern(detector: &SlitherDetector) -> AbstractPattern {
+    pub(crate) fn extract_pattern(detector: &SlitherDetector) -> AbstractPattern {
         let vuln_class = Self::map_check_to_class(&detector.check);
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
@@ -182,7 +182,7 @@ impl PatternAbstractor {
         }
     }
 
-    fn map_check_to_class(check: &str) -> VulnClass {
+    pub(crate) fn map_check_to_class(check: &str) -> VulnClass {
         match check {
             "reentrancy-eth" | "reentrancy-no-eth" | "reentrancy-benign" | "reentrancy-unlimited-gas" | "reentrancy-events" => VulnClass::Reentrancy,
             "arbitrary-send-erc20" | "arbitrary-send-erc20-permit" | "arbitrary-send-eth" | "controlled-delegatecall" | "suicidal" => VulnClass::AccessControl,

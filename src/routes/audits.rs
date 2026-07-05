@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use crate::auth::middleware::AuthUser;
 use crate::error::AppError;
-use crate::models::audit::{AuditJob, AuditStatus};
+use crate::models::audit::{AuditJob, AuditStatus, AuditListRow};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -32,6 +32,20 @@ pub struct CreateAuditResponse {
     pub audit_id: Uuid,
     pub status: String,
     pub request_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct ListQuery {
+    limit: Option<i64>,
+    after: Option<Uuid>,
+}
+
+#[derive(Serialize)]
+pub struct AuditListResponse {
+    data: Vec<AuditListRow>,
+    next_cursor: Option<Uuid>,
+    has_more: bool,
+    request_id: String,
 }
 
 #[derive(Clone, Serialize, Debug)]
@@ -153,4 +167,58 @@ pub async fn get_report(
     } else {
         Err(AppError::NotFound("Report not ready yet".into()))
     }
+}
+
+pub async fn list_audits(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    axum::extract::Query(query): axum::extract::Query<ListQuery>,
+) -> Result<Json<AuditListResponse>, AppError> {
+    let limit = query.limit.unwrap_or(20);
+    
+    let rows = if let Some(after) = query.after {
+        sqlx::query_as!(
+            AuditListRow,
+            r#"
+            SELECT a.id, a.contract_id, c.name as contract_name, a.status, a.created_at
+            FROM audits a
+            JOIN contracts c ON a.contract_id = c.id
+            WHERE a.tenant_id = $1 AND a.id > $2
+            ORDER BY a.id ASC
+            LIMIT $3
+            "#,
+            auth.tenant_id,
+            after,
+            limit + 1
+        )
+        .fetch_all(&state.pool)
+        .await?
+    } else {
+        sqlx::query_as!(
+            AuditListRow,
+            r#"
+            SELECT a.id, a.contract_id, c.name as contract_name, a.status, a.created_at
+            FROM audits a
+            JOIN contracts c ON a.contract_id = c.id
+            WHERE a.tenant_id = $1
+            ORDER BY a.id ASC
+            LIMIT $2
+            "#,
+            auth.tenant_id,
+            limit + 1
+        )
+        .fetch_all(&state.pool)
+        .await?
+    };
+
+    let has_more = rows.len() > limit as usize;
+    let items: Vec<AuditListRow> = rows.into_iter().take(limit as usize).collect();
+    let next_cursor = items.last().map(|c| c.id);
+
+    Ok(Json(AuditListResponse {
+        data: items,
+        next_cursor,
+        has_more,
+        request_id: Uuid::new_v4().to_string(),
+    }))
 }

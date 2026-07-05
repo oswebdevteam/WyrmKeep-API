@@ -51,3 +51,12 @@ pub struct AuditReport {
     pub memory_matches_count: usize,
     // Add other fields as needed for the final report
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuditListRow {
+    pub id: Uuid,
+    pub contract_id: Uuid,
+    pub contract_name: String,
+    pub status: String,
+    pub created_at: time::OffsetDateTime,
+}
