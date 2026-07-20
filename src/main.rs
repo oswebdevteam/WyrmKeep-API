@@ -1,4 +1,5 @@
-use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -28,8 +29,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Database connection
     let database_url = std::env::var("DATABASE_URL")
         .expect("DATABASE_URL must be set");
-    
-    let pool = PgPool::connect(&database_url)
+
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .min_connections(1)
+        .acquire_timeout(Duration::from_secs(10))
+        .max_lifetime(Duration::from_secs(30 * 60)) 
+        .idle_timeout(Duration::from_secs(10 * 60))   
+        .test_before_acquire(true)
+        .connect(&database_url)
         .await
         .expect("Failed to connect to database");
 

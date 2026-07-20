@@ -120,10 +120,11 @@ pub async fn stream_audit(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, AppError> {
-    // Verify ownership
-    sqlx::query!(
-        "SELECT id FROM audits WHERE id = $1 AND tenant_id = $2",
+) -> Result<Sse<Box<dyn tokio_stream::Stream<Item = Result<Event, Infallible>> + Send + Unpin>>, AppError> {
+    // Always check DB status first — the broadcast channel may already be
+    // cleaned up if the pipeline completed before this SSE connection opened.
+    let row = sqlx::query!(
+        "SELECT id, status FROM audits WHERE id = $1 AND tenant_id = $2",
         id,
         auth.tenant_id
     )
@@ -131,21 +132,80 @@ pub async fn stream_audit(
     .await?
     .ok_or_else(|| AppError::NotFound("Audit not found".into()))?;
 
-    let rx = if let Some(tx) = state.audit_events.get(&id) {
-        tx.subscribe()
-    } else {
-        return Err(AppError::NotFound("Audit stream not active".into()));
-    };
+    let stream: Box<dyn tokio_stream::Stream<Item = Result<Event, Infallible>> + Send + Unpin> =
+        match row.status.as_str() {
+            // ── Terminal states: synthesize event immediately
+            // Never touch the broadcast channel — it is already cleaned up.
+            "complete" => {
+                let event = AuditEvent::ReportReady { audit_id: id };
+                let data = serde_json::to_string(&event).unwrap();
+                Box::new(tokio_stream::once(Ok(Event::default().data(data))))
+            }
 
-    let stream = BroadcastStream::new(rx).filter_map(|res| match res {
-        Ok(event) => {
-            let data = serde_json::to_string(&event).unwrap();
-            Some(Ok(Event::default().data(data)))
-        }
-        Err(_) => None,
-    });
+            "failed" => {
+                let event = AuditEvent::Error {
+                    message: "Audit pipeline failed. Check server logs for details.".into(),
+                };
+                let data = serde_json::to_string(&event).unwrap();
+                Box::new(tokio_stream::once(Ok(Event::default().data(data))))
+            }
 
-    Ok(Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15))))
+            // ── In-progress: subscribe to live broadcast channel
+            _ => {
+                if let Some(tx) = state.audit_events.get(&id) {
+                    let rx = tx.subscribe();
+
+                    // Send an immediate confirmation so the client knows
+                    // the SSE connection is live and the stream is active.
+                    let initial_event = AuditEvent::StatusUpdate {
+                        stage: "running".into(),
+                        message: "Connected to live audit stream".into(),
+                    };
+                    let initial_data = serde_json::to_string(&initial_event).unwrap();
+                    let initial_stream =
+                        tokio_stream::once(Ok(Event::default().data(initial_data)));
+
+                    let broadcast = BroadcastStream::new(rx).filter_map(|res| match res {
+                        Ok(event) => {
+                            let data = serde_json::to_string(&event).unwrap();
+                            Some(Ok(Event::default().data(data)))
+                        }
+                        Err(_) => None,
+                    });
+
+                    Box::new(initial_stream.chain(broadcast))
+                } else {
+                    // Sender is gone but DB still shows queued/running.
+                    // This is a tiny race window: pipeline completed and cleaned
+                    // up the sender between our DB read and the DashMap lookup.
+                    // Wait briefly then re-query for the final status.
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+
+                    let final_status = sqlx::query_scalar!(
+                        "SELECT status FROM audits WHERE id = $1",
+                        id
+                    )
+                    .fetch_one(&state.pool)
+                    .await
+                    .unwrap_or_else(|_| "failed".to_string());
+
+                    let event = match final_status.as_str() {
+                        "complete" => AuditEvent::ReportReady { audit_id: id },
+                        _ => AuditEvent::Error {
+                            message: "Audit stream unavailable — pipeline may have completed before connection was established.".into(),
+                        },
+                    };
+                    let data = serde_json::to_string(&event).unwrap();
+                    Box::new(tokio_stream::once(Ok(Event::default().data(data))))
+                }
+            }
+        };
+
+    Ok(Sse::new(stream)
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(Duration::from_secs(15)),
+        ))
 }
 
 pub async fn get_report(
@@ -175,7 +235,7 @@ pub async fn list_audits(
     axum::extract::Query(query): axum::extract::Query<ListQuery>,
 ) -> Result<Json<AuditListResponse>, AppError> {
     let limit = query.limit.unwrap_or(20);
-    
+
     let rows = if let Some(after) = query.after {
         sqlx::query_as!(
             AuditListRow,

@@ -77,8 +77,18 @@ pub fn build(state: AppState) -> Router {
         }
     });
 
-    Router::new()
+    // Health check is on its own router – no rate-limiting so aggressive polling
+    // from orchestrators/load-balancers never triggers the governor.
+    let health_router = Router::new()
         .route("/health", get(health::health_check))
+        .layer(
+            tower::ServiceBuilder::new()
+                .set_x_request_id(MakeRequestUuid)
+                .layer(TraceLayer::new_for_http())
+                .layer(CorsLayer::permissive()),
+        );
+
+    let api_router = Router::new()
         // Tenants
         .route("/v1/tenants", post(tenants::create_tenant))
         .route("/v1/tenants/me", get(tenants::get_me))
@@ -109,5 +119,7 @@ pub fn build(state: AppState) -> Router {
                 .layer(GovernorLayer {
                     config: governor_conf,
                 }),
-        )
+        );
+
+    health_router.merge(api_router)
 }

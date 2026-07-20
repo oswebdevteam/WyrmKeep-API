@@ -9,8 +9,6 @@ use crate::error::AppError;
 use crate::models::audit::AuditJob;
 use crate::services::{cognee_client::CogneeClient, sidecar_client::SidecarClient};
 
-// We will define AuditEvent in routes/audits.rs as requested or here if needed,
-// but let's define it here or import it. The prompt says it's in routes/audits.rs.
 use crate::routes::audits::AuditEvent;
 
 pub struct AppStateInner {

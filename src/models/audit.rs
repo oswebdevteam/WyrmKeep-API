@@ -58,5 +58,6 @@ pub struct AuditListRow {
     pub contract_id: Uuid,
     pub contract_name: String,
     pub status: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: time::OffsetDateTime,
 }

@@ -31,4 +31,5 @@ axum-extra = { version = "0.9.3", features = ["typed-header"] }
 dashmap = "5"
 dotenv = "0.15"
 tower_governor = { version = "0.4", features = ["axum"] }
+async-stream = "0.3.6"
 
