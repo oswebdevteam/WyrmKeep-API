@@ -130,7 +130,7 @@ pub async fn get_badge(
                grade, vulnerability_count, high_severity_count, chain,
                issued_at, metadata_json
         FROM audit_badges
-        WHERE id = $1 AND tenant_id = $2
+        WHERE (id = $1 OR audit_id = $1) AND tenant_id = $2
         "#,
     )
     .bind(id)
