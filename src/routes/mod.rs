@@ -1,13 +1,14 @@
 pub mod audits;
+pub mod badges;
+pub mod call_graph;
 pub mod contracts;
 pub mod findings;
 pub mod health;
-pub mod memory;
 pub mod tenants;
 
 use axum::{
     http,
-    routing::{delete, get, post},
+    routing::{get, post},
     Router,
 };
 use std::time::Duration;
@@ -23,8 +24,6 @@ use tower_http::{
 
 use crate::state::AppState;
 
-// ── Rate-limit key extractor (per tenant)
-
 #[derive(Clone)]
 pub struct TenantRateLimitKey;
 
@@ -32,13 +31,11 @@ impl KeyExtractor for TenantRateLimitKey {
     type Key = String;
 
     fn extract<B>(&self, req: &http::Request<B>) -> Result<Self::Key, tower_governor::errors::GovernorError> {
-        // Try X-API-Key header with tenant prefix
         if let Some(api_key) = req.headers().get("X-API-Key") {
             if let Ok(value) = api_key.to_str() {
                 return Ok(value.split('.').next().unwrap_or("anon").to_string());
             }
         }
-        // Try Bearer token — use truncated token as key for uniqueness
         if let Ok(auth_value) = std::str::from_utf8(
             req.headers()
                 .get(http::header::AUTHORIZATION)
@@ -55,12 +52,10 @@ impl KeyExtractor for TenantRateLimitKey {
     }
 }
 
-// ── Router builder
-
 pub fn build(state: AppState) -> Router {
     let governor_conf = std::sync::Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(1) // ≈ 60 req/min steady
+            .per_second(1)
             .burst_size(10)
             .key_extractor(TenantRateLimitKey)
             .finish()
@@ -68,7 +63,6 @@ pub fn build(state: AppState) -> Router {
     );
     let governor_limiter = governor_conf.limiter().clone();
 
-    // Evict stale entries every 60s
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
@@ -77,10 +71,22 @@ pub fn build(state: AppState) -> Router {
         }
     });
 
-    // Health check is on its own router – no rate-limiting so aggressive polling
-    // from orchestrators/load-balancers never triggers the governor.
     let health_router = Router::new()
         .route("/health", get(health::health_check))
+        .layer(
+            tower::ServiceBuilder::new()
+                .set_x_request_id(MakeRequestUuid)
+                .layer(TraceLayer::new_for_http())
+                .layer(CorsLayer::permissive()),
+        );
+
+    // Public verification endpoint — outside the authed router
+    let public_router = Router::new()
+        .route(
+            "/v1/badges/verify/:certificate_hash",
+            get(badges::verify_badge),
+        )
+        .with_state(state.clone())
         .layer(
             tower::ServiceBuilder::new()
                 .set_x_request_id(MakeRequestUuid)
@@ -101,13 +107,13 @@ pub fn build(state: AppState) -> Router {
         .route("/v1/audits", get(audits::list_audits))
         .route("/v1/audits/:id/stream", get(audits::stream_audit))
         .route("/v1/audits/:id/report", get(audits::get_report))
+        .route("/v1/audits/:id/call-graph", get(call_graph::get_call_graph))
         // Findings
         .route("/v1/findings", get(findings::list_findings))
         .route("/v1/findings/:id/chain", get(findings::get_causal_chain))
-        // Memory
-        .route("/v1/memory/recall", post(memory::recall_memory))
-        .route("/v1/memory/prune", delete(memory::prune_memory))
-        .route("/v1/memory/stats", get(memory::memory_stats))
+        // Badges
+        .route("/v1/badges", get(badges::list_badges))
+        .route("/v1/badges/:id", get(badges::get_badge))
         .with_state(state)
         .layer(
             tower::ServiceBuilder::new()
@@ -121,5 +127,5 @@ pub fn build(state: AppState) -> Router {
                 }),
         );
 
-    health_router.merge(api_router)
+    health_router.merge(public_router).merge(api_router)
 }

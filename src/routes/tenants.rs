@@ -9,17 +9,12 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
     Argon2,
 };
-use chrono::{DateTime, Utc};
 
 use crate::auth::middleware::{AuthUser, Role};
 use crate::error::AppError;
 use crate::models::tenant::{CreateTenantRequest, Tenant};
 use crate::state::AppState;
 use crate::auth::jwt::encode_token;
-
-fn offset_datetime_to_chrono(dt: time::OffsetDateTime) -> DateTime<Utc> {
-    DateTime::from_timestamp(dt.unix_timestamp(), dt.nanosecond()).unwrap()
-}
 
 #[derive(Serialize)]
 pub struct CreateTenantResponse {
@@ -40,7 +35,6 @@ pub async fn create_tenant(
     auth: AuthUser,
     Json(payload): Json<CreateTenantRequest>,
 ) -> Result<(StatusCode, Json<CreateTenantResponse>), AppError> {
-    // Admin only route
     if auth.role != Role::Admin {
         return Err(AppError::Forbidden);
     }
@@ -53,20 +47,16 @@ pub async fn create_tenant(
         .to_string();
 
     let tenant_id = Uuid::new_v4();
-    let cognee_dataset_private = format!("wyrmkeep:{}:private", tenant_id);
-    let cognee_dataset_session = format!("wyrmkeep:{}:session", tenant_id);
 
     let tenant = sqlx::query!(
         r#"
-        INSERT INTO tenants (id, name, api_key_hash, cognee_dataset_private, cognee_dataset_session)
-        VALUES ($1, $2, $3, $4, $5)
-        RETURNING id, name, api_key_hash, cognee_dataset_private, cognee_dataset_session, created_at
+        INSERT INTO tenants (id, name, api_key_hash)
+        VALUES ($1, $2, $3)
+        RETURNING id, name, api_key_hash, created_at
         "#,
         tenant_id,
         payload.name,
-        api_key_hash,
-        cognee_dataset_private,
-        cognee_dataset_session
+        api_key_hash
     )
     .fetch_one(&state.pool)
     .await?;
@@ -77,9 +67,7 @@ pub async fn create_tenant(
         id: tenant.id,
         name: tenant.name,
         api_key_hash: tenant.api_key_hash,
-        cognee_dataset_private: tenant.cognee_dataset_private,
-        cognee_dataset_session: tenant.cognee_dataset_session,
-        created_at: offset_datetime_to_chrono(tenant.created_at),
+        created_at: tenant.created_at,
     };
 
     Ok((
@@ -99,7 +87,7 @@ pub async fn get_me(
 ) -> Result<Json<TenantResponse>, AppError> {
     let tenant = sqlx::query!(
         r#"
-        SELECT id, name, api_key_hash, cognee_dataset_private, cognee_dataset_session, created_at
+        SELECT id, name, api_key_hash, created_at
         FROM tenants
         WHERE id = $1
         "#,
@@ -113,9 +101,7 @@ pub async fn get_me(
         id: tenant.id,
         name: tenant.name,
         api_key_hash: tenant.api_key_hash,
-        cognee_dataset_private: tenant.cognee_dataset_private,
-        cognee_dataset_session: tenant.cognee_dataset_session,
-        created_at: offset_datetime_to_chrono(tenant.created_at),
+        created_at: tenant.created_at,
     };
 
     Ok(Json(TenantResponse {

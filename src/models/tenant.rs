@@ -8,8 +8,6 @@ pub struct Tenant {
     pub name: String,
     #[serde(skip_serializing)]
     pub api_key_hash: String,
-    pub cognee_dataset_private: String,
-    pub cognee_dataset_session: String,
     pub created_at: DateTime<Utc>,
 }
 

@@ -4,16 +4,13 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
+use chrono::{Utc};
 
 use crate::auth::middleware::AuthUser;
 use crate::error::AppError;
 use crate::models::finding::Finding;
 use crate::state::AppState;
 
-fn offset_datetime_to_chrono(dt: time::OffsetDateTime) -> DateTime<Utc> {
-    DateTime::from_timestamp(dt.unix_timestamp(), dt.nanosecond()).unwrap()
-}
 
 #[derive(sqlx::FromRow)]
 struct FindingRow {
@@ -23,10 +20,15 @@ struct FindingRow {
     vuln_class: String,
     severity: String,
     description: String,
-    affected_functions: serde_json::Value,
-    causal_chain: Option<serde_json::Value>,
+    affected_functions: sqlx::types::Json<serde_json::Value>,
+    causal_chain: Option<sqlx::types::Json<serde_json::Value>>,
     historical_matches: Option<i32>,
-    created_at: time::OffsetDateTime,
+    plain_english: Option<String>,
+    suggested_fix: Option<sqlx::types::Json<serde_json::Value>>,
+    attack_path: Option<sqlx::types::Json<serde_json::Value>>,
+    bounty_estimate_usd: Option<i64>,
+    confidence: Option<f32>,
+    created_at: chrono::DateTime<Utc>,
 }
 
 #[derive(Serialize)]
@@ -49,11 +51,14 @@ pub async fn list_findings(
     axum::extract::Query(query): axum::extract::Query<ListQuery>,
 ) -> Result<Json<FindingListResponse>, AppError> {
     let limit = query.limit.unwrap_or(20);
-    
+
     let rows: Vec<FindingRow> = if let Some(after) = query.after {
         sqlx::query_as(
             r#"
-            SELECT id, audit_id, tenant_id, vuln_class, severity, description, affected_functions, causal_chain, historical_matches, created_at
+            SELECT id, audit_id, tenant_id, vuln_class, severity, description,
+                   affected_functions, causal_chain, historical_matches,
+                   plain_english, suggested_fix, attack_path, bounty_estimate_usd,
+                   confidence, created_at
             FROM findings
             WHERE tenant_id = $1 AND id > $2
             ORDER BY id ASC
@@ -68,7 +73,10 @@ pub async fn list_findings(
     } else {
         sqlx::query_as(
             r#"
-            SELECT id, audit_id, tenant_id, vuln_class, severity, description, affected_functions, causal_chain, historical_matches, created_at
+            SELECT id, audit_id, tenant_id, vuln_class, severity, description,
+                   affected_functions, causal_chain, historical_matches,
+                   plain_english, suggested_fix, attack_path, bounty_estimate_usd,
+                   confidence, created_at
             FROM findings
             WHERE tenant_id = $1
             ORDER BY id ASC
@@ -90,13 +98,18 @@ pub async fn list_findings(
             vuln_class: r.vuln_class,
             severity: r.severity.parse().unwrap(),
             description: r.description,
-            affected_functions: r.affected_functions,
-            causal_chain: r.causal_chain,
+            affected_functions: r.affected_functions.0,
+            causal_chain: r.causal_chain.map(|j| j.0),
             historical_matches: r.historical_matches.unwrap_or(0),
-            created_at: offset_datetime_to_chrono(r.created_at),
+            plain_english: r.plain_english,
+            suggested_fix: r.suggested_fix.map(|j| j.0),
+            attack_path: r.attack_path.map(|j| j.0),
+            bounty_estimate_usd: r.bounty_estimate_usd,
+            confidence: r.confidence,
+            created_at: r.created_at,
         }
     }).collect();
-    
+
     let next_cursor = findings.last().map(|f| f.id);
 
     Ok(Json(FindingListResponse {

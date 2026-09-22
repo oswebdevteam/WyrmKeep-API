@@ -1,11 +1,14 @@
 use std::time::Instant;
+use uuid::Uuid;
 
-#[allow(unused_imports)]
-use crate::models::audit::{AuditJob, AuditReport, AuditStatus};
+use crate::models::audit::{AuditJob, AuditReport, AuditStatus, SeverityBreakdown};
+use crate::models::contract::ContractLanguage;
 use crate::models::finding::FindingSeverity;
-use crate::services::pattern::PatternAbstractor;
-use crate::state::AppState;
 use crate::routes::audits::AuditEvent;
+use crate::services::analyzer::AnalysisEngine;
+use crate::services::badge_issuer::BadgeIssuer;
+use crate::services::bounty_estimator::BountyEstimator;
+use crate::state::AppState;
 
 pub struct AuditPipeline {
     state: AppState,
@@ -19,15 +22,13 @@ impl AuditPipeline {
     pub async fn run(&self, job: AuditJob) -> Result<(), crate::error::AppError> {
         let start_time = Instant::now();
         let audit_id = job.id;
-        
-        // Helper to emit events if there is a listener
-        let emit_event = |event: AuditEvent| {
+
+        let emit = |event: AuditEvent| {
             if let Some(sender_ref) = self.state.audit_events.get(&audit_id) {
                 let _ = sender_ref.value().send(event);
             }
         };
 
-        // 1. DB: update audit status -> "running"
         sqlx::query!(
             "UPDATE audits SET status = $1 WHERE id = $2",
             AuditStatus::Running.as_ref(),
@@ -36,156 +37,215 @@ impl AuditPipeline {
         .execute(&self.state.pool)
         .await?;
 
-        emit_event(AuditEvent::StatusUpdate {
-            stage: "starting".to_string(),
-            message: "Audit initiated".to_string(),
+        emit(AuditEvent::StatusUpdate {
+            stage: "starting".into(),
+            message: "Audit initiated".into(),
         });
 
-        // 2. sidecar_client.audit
-        let node_set: Vec<&str> = job.vuln_class_tags.iter().map(|s| s.as_str()).collect();
-        let sidecar_result = match self
-            .state
-            .sidecar_client
-            .audit(
-                &job.source_code,
-                &job.contract_name,
-                "wyrmkeep:shared:patterns",
-                &node_set,
-            )
-            .await
-        {
-            Ok(res) => res,
-            Err(e) => {
-                self.fail_audit(audit_id, &e.to_string()).await?;
-                emit_event(AuditEvent::Error {
-                    message: e.to_string(),
-                });
-                return Err(e);
-            }
-        };
+        let language: ContractLanguage = job.language.parse().unwrap_or_default();
 
-        let finding_count = sidecar_result.slither_report.detectors.len();
-        emit_event(AuditEvent::SlitherComplete { finding_count });
-        emit_event(AuditEvent::CognifyComplete {
-            elapsed_ms: sidecar_result.elapsed_ms,
+        emit(AuditEvent::AnalysisStarted {
+            language: language.to_string(),
         });
 
-        let slither_raw = serde_json::to_value(&sidecar_result.slither_report).unwrap();
-        sqlx::query!(
-            "UPDATE audits SET slither_raw = $1 WHERE id = $2",
-            slither_raw,
-            audit_id
-        )
-        .execute(&self.state.pool)
-        .await?;
+        let vulnerabilities = AnalysisEngine::analyze(&job.source_code, &language);
+        let analysis_elapsed = start_time.elapsed();
 
-        // 3. PatternAbstractor::extract
-        let patterns = PatternAbstractor::extract(&sidecar_result.slither_report);
-        let node_count = patterns.iter().map(|p| p.nodes.len()).sum();
-        let edge_count = patterns.iter().map(|p| p.edges.len()).sum();
-        
-        emit_event(AuditEvent::PatternExtracted { node_count, edge_count });
-        
-        let abstract_pattern_json = serde_json::to_value(&patterns).unwrap();
-        sqlx::query!(
-            "UPDATE audits SET abstract_pattern = $1 WHERE id = $2",
-            abstract_pattern_json,
-            audit_id
-        )
-        .execute(&self.state.pool)
-        .await?;
+        emit(AuditEvent::AnalysisComplete {
+            vulnerability_count: vulnerabilities.len(),
+            elapsed_ms: analysis_elapsed.as_millis() as u64,
+        });
 
-        // 4 & 5. Serialize and cognee_client.add
-        let mut match_count = 0;
-        let mut memory_matches = Vec::new();
-        
-        for pattern in patterns {
-            let anonymized_vars: Vec<String> = pattern.nodes.iter().filter(|n| n.node_type == crate::models::vuln_ontology::VulnNodeType::StateVariable).map(|n| n.label.clone()).collect();
-            let anonymized_fns: Vec<String> = pattern.nodes.iter().filter(|n| n.node_type == crate::models::vuln_ontology::VulnNodeType::Function).map(|n| n.label.clone()).collect();
-            
-            let text = format!(
-                "VulnClass: {:?}\nSeverity: {}\nCallChain: {:?}\nViolatedInvariant: {:?}\nStateVariables: {:?}",
-                pattern.vuln_class, pattern.severity, anonymized_fns, "None", anonymized_vars
-            );
+        let mut call_graph_nodes: Vec<serde_json::Value> = Vec::new();
+        let mut call_graph_edges: Vec<serde_json::Value> = Vec::new();
+        let mut attack_paths: Vec<serde_json::Value> = Vec::new();
 
-            let tags = [format!("{:?}", pattern.vuln_class)];
-            
-            if let Err(e) = self.state.cognee_client.add(&text, "wyrmkeep:shared:patterns", &tags.iter().map(|s| s.as_str()).collect::<Vec<&str>>()).await {
-                tracing::warn!("Failed to add to memory: {}", e);
+        for vuln in &vulnerabilities {
+            for step in &vuln.attack_path {
+                let node_id = format!("{}_{}", step.function_name, step.order);
+                let is_vulnerable = step.order == 0;
+
+                call_graph_nodes.push(serde_json::json!({
+                    "id": node_id,
+                    "type": step.action,
+                    "vulnerable": is_vulnerable,
+                    "line": step.line_range.as_ref().map(|lr| lr.start),
+                    "function": step.function_name,
+                }));
             }
 
-            emit_event(AuditEvent::MemoryIngested {
-                dataset: "wyrmkeep:shared:patterns".to_string(),
+            for pair in vuln.attack_path.windows(2) {
+                call_graph_edges.push(serde_json::json!({
+                    "from": format!("{}_{}", pair[0].function_name, pair[0].order),
+                    "to": format!("{}_{}", pair[1].function_name, pair[1].order),
+                    "type": "calls",
+                    "attack_path": true,
+                }));
+            }
+
+            if !vuln.attack_path.is_empty() {
+                attack_paths.push(serde_json::json!({
+                    "name": format!("{:?} via {}", vuln.vuln_class, vuln.affected_functions.first().unwrap_or(&"unknown".into())),
+                    "steps": vuln.attack_path,
+                }));
+            }
+        }
+
+        emit(AuditEvent::CallGraphReady {
+            node_count: call_graph_nodes.len(),
+            edge_count: call_graph_edges.len(),
+        });
+
+        let mut high = 0usize;
+        let mut medium = 0usize;
+        let mut low = 0usize;
+        let mut informational = 0usize;
+
+        for vuln in &vulnerabilities {
+            match vuln.severity {
+                FindingSeverity::High => high += 1,
+                FindingSeverity::Medium => medium += 1,
+                FindingSeverity::Low => low += 1,
+                FindingSeverity::Informational => informational += 1,
+            }
+        }
+
+        let total = vulnerabilities.len();
+
+        emit(AuditEvent::PatternExtracted {
+            node_count: call_graph_nodes.len(),
+            edge_count: call_graph_edges.len(),
+        });
+
+        let bounty_estimator = BountyEstimator::default();
+        let bounty_total = bounty_estimator.estimate(&vulnerabilities);
+
+        for (idx, vuln) in vulnerabilities.iter().enumerate() {
+            emit(AuditEvent::EnrichmentStarted {
+                finding_index: idx,
+                total,
             });
 
-            // 6. cognee_client.recall
-            let query = format!("exploit pattern: {:?}", pattern.vuln_class);
-            if let Ok(matches) = self.state.cognee_client.recall(&query, "wyrmkeep:shared:patterns", 5).await {
-                match_count += matches.len();
-                memory_matches.extend(matches);
-            }
-        }
+            let source_snippet = vuln.affected_lines.first().map(|lr| {
+                extract_lines(&job.source_code, lr.start, lr.end)
+            }).unwrap_or_default();
 
-        emit_event(AuditEvent::RecallComplete { match_count });
+            let plain_english = self
+                .state
+                .llm_client
+                .explain_vulnerability(vuln, &source_snippet)
+                .await
+                .ok();
 
-        // 7. Merge and Report
-        let memory_matches_json = serde_json::to_value(&memory_matches).unwrap();
-        
-        let report = AuditReport {
-            slither_findings_count: finding_count,
-            memory_matches_count: match_count,
-        };
-        let report_json = serde_json::to_value(&report).unwrap();
+            let llm_fix = self
+                .state
+                .llm_client
+                .suggest_fix(vuln, &source_snippet)
+                .await
+                .ok();
 
-        sqlx::query!(
-            "UPDATE audits SET memory_matches = $1, report = $2 WHERE id = $3",
-            memory_matches_json,
-            report_json,
-            audit_id
-        )
-        .execute(&self.state.pool)
-        .await?;
+            let suggested_fix_json = llm_fix
+                .as_ref()
+                .and_then(|f| serde_json::to_value(f).ok())
+                .or_else(|| vuln.suggested_fix.as_ref().and_then(|f| serde_json::to_value(f).ok()));
 
-        // Insert Findings
-        for detector in sidecar_result.slither_report.detectors {
-            let severity: FindingSeverity = detector.impact.parse().unwrap_or(FindingSeverity::Informational);
-            
-            sqlx::query!(
-                "INSERT INTO findings (audit_id, tenant_id, vuln_class, severity, description, affected_functions) VALUES ($1, $2, $3, $4, $5, $6)",
-                audit_id,
-                job.tenant_id,
-                detector.check,
-                severity.as_ref(),
-                detector.description,
-                serde_json::to_value(&detector.elements).unwrap()
+            let attack_path_json = serde_json::to_value(&vuln.attack_path).ok();
+            let bounty_per = bounty_estimator.per_finding(&vuln.severity) as i64;
+
+            sqlx::query(
+                r#"
+                INSERT INTO findings
+                    (audit_id, tenant_id, vuln_class, severity, description,
+                     affected_functions, plain_english, suggested_fix, attack_path,
+                     bounty_estimate_usd, confidence)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                "#,
             )
+            .bind(audit_id)
+            .bind(job.tenant_id)
+            .bind(&vuln.check_name)
+            .bind(vuln.severity.as_ref())
+            .bind(&vuln.description)
+            .bind(sqlx::types::Json(serde_json::to_value(&vuln.affected_functions).unwrap_or_else(|_| serde_json::json!([]))))
+            .bind(plain_english)
+            .bind(suggested_fix_json.map(sqlx::types::Json))
+            .bind(attack_path_json.map(sqlx::types::Json))
+            .bind(bounty_per)
+            .bind(vuln.confidence)
             .execute(&self.state.pool)
             .await?;
+
+            emit(AuditEvent::EnrichmentComplete { finding_index: idx });
         }
 
-        // 8. Forget private dataset
-        let private_dataset = format!("wyrmkeep:{}:private", job.tenant_id);
-        let _ = self.state.cognee_client.forget_dataset(&private_dataset).await;
+        let call_graph = serde_json::json!({
+            "nodes": call_graph_nodes,
+            "edges": call_graph_edges,
+            "attack_paths": attack_paths,
+        });
 
-        // 9. Update audit status -> "complete"
+        let report = AuditReport {
+            vulnerability_count: total,
+            severity_breakdown: SeverityBreakdown {
+                high,
+                medium,
+                low,
+                informational,
+            },
+            call_graph: call_graph.clone(),
+            bounty_estimate_usd: bounty_total,
+            badge_id: None,
+            chain: language.to_string(),
+        };
+        let report_json = serde_json::to_value(&report)
+            .map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+
+        let badge_id = BadgeIssuer::issue(
+            &self.state.pool,
+            audit_id,
+            job.tenant_id,
+            &job.contract_name,
+            &language.to_string(),
+            &report_json,
+            total as i32,
+            high as i32,
+            medium as i32,
+        )
+        .await
+        .ok();
+
+        let final_report = AuditReport {
+            badge_id,
+            ..report
+        };
+        let final_report_json = serde_json::to_value(&final_report)
+            .map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+
         sqlx::query!(
-            "UPDATE audits SET status = $1, completed_at = NOW() WHERE id = $2",
+            "UPDATE audits SET report = $1, status = $2, completed_at = NOW() WHERE id = $3",
+            final_report_json,
             AuditStatus::Complete.as_ref(),
             audit_id
         )
         .execute(&self.state.pool)
         .await?;
 
-        emit_event(AuditEvent::ReportReady { audit_id });
+        emit(AuditEvent::ReportReady { audit_id });
 
-        // Clean up SSE sender
         self.state.audit_events.remove(&audit_id);
 
-        tracing::info!("Audit {} completed in {:?}", audit_id, start_time.elapsed());
+        tracing::info!(
+            audit_id = %audit_id,
+            vulns = total,
+            grade = ?badge_id.map(|_| "issued"),
+            elapsed = ?start_time.elapsed(),
+            "Audit completed"
+        );
+
         Ok(())
     }
 
-    async fn fail_audit(&self, audit_id: uuid::Uuid, error_msg: &str) -> Result<(), crate::error::AppError> {
+    pub async fn fail_audit(&self, audit_id: Uuid, error_msg: &str) -> Result<(), crate::error::AppError> {
         sqlx::query!(
             "UPDATE audits SET status = $1, error_message = $2 WHERE id = $3",
             AuditStatus::Failed.as_ref(),
@@ -194,8 +254,17 @@ impl AuditPipeline {
         )
         .execute(&self.state.pool)
         .await?;
-        
+
         self.state.audit_events.remove(&audit_id);
         Ok(())
     }
+}
+
+fn extract_lines(source: &str, start: u32, end: u32) -> String {
+    source
+        .lines()
+        .skip(start.saturating_sub(1) as usize)
+        .take((end.saturating_sub(start) + 1) as usize)
+        .collect::<Vec<_>>()
+        .join("\n")
 }

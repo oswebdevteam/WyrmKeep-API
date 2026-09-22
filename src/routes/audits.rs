@@ -24,7 +24,7 @@ pub struct CreateAuditRequest {
 }
 
 fn default_vuln_tags() -> Vec<String> {
-    vec!["all".to_string(), "solidity".to_string()]
+    vec!["all".to_string()]
 }
 
 #[derive(Serialize)]
@@ -52,11 +52,12 @@ pub struct AuditListResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuditEvent {
     StatusUpdate { stage: String, message: String },
-    SlitherComplete { finding_count: usize },
+    AnalysisStarted { language: String },
+    AnalysisComplete { vulnerability_count: usize, elapsed_ms: u64 },
     PatternExtracted { node_count: usize, edge_count: usize },
-    MemoryIngested { dataset: String },
-    CognifyComplete { elapsed_ms: u64 },
-    RecallComplete { match_count: usize },
+    EnrichmentStarted { finding_index: usize, total: usize },
+    EnrichmentComplete { finding_index: usize },
+    CallGraphReady { node_count: usize, edge_count: usize },
     ReportReady { audit_id: Uuid },
     Error { message: String },
 }
@@ -66,9 +67,8 @@ pub async fn create_audit(
     auth: AuthUser,
     Json(payload): Json<CreateAuditRequest>,
 ) -> Result<(StatusCode, Json<CreateAuditResponse>), AppError> {
-    // 1. Verify contract belongs to tenant and get source
     let contract = sqlx::query!(
-        "SELECT name, source_code FROM contracts WHERE id = $1 AND tenant_id = $2",
+        "SELECT name, source_code, language FROM contracts WHERE id = $1 AND tenant_id = $2",
         payload.contract_id,
         auth.tenant_id
     )
@@ -76,7 +76,6 @@ pub async fn create_audit(
     .await?
     .ok_or_else(|| AppError::NotFound("Contract not found".into()))?;
 
-    // 2. Create Audit row
     let row = sqlx::query!(
         "INSERT INTO audits (tenant_id, contract_id, status) VALUES ($1, $2, $3) RETURNING id",
         auth.tenant_id,
@@ -88,17 +87,16 @@ pub async fn create_audit(
 
     let audit_id = row.id;
 
-    // 3. Setup SSE broadcast channel
     let (tx, _) = broadcast::channel(100);
     state.audit_events.insert(audit_id, tx);
 
-    // 4. Send to job queue
     let job = AuditJob {
         id: audit_id,
         tenant_id: auth.tenant_id,
         contract_id: payload.contract_id,
         contract_name: contract.name,
         source_code: contract.source_code,
+        language: contract.language,
         vuln_class_tags: payload.vuln_class_tags,
     };
 
@@ -121,8 +119,6 @@ pub async fn stream_audit(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Sse<Box<dyn tokio_stream::Stream<Item = Result<Event, Infallible>> + Send + Unpin>>, AppError> {
-    // Always check DB status first — the broadcast channel may already be
-    // cleaned up if the pipeline completed before this SSE connection opened.
     let row = sqlx::query!(
         "SELECT id, status FROM audits WHERE id = $1 AND tenant_id = $2",
         id,
@@ -134,8 +130,6 @@ pub async fn stream_audit(
 
     let stream: Box<dyn tokio_stream::Stream<Item = Result<Event, Infallible>> + Send + Unpin> =
         match row.status.as_str() {
-            // ── Terminal states: synthesize event immediately
-            // Never touch the broadcast channel — it is already cleaned up.
             "complete" => {
                 let event = AuditEvent::ReportReady { audit_id: id };
                 let data = serde_json::to_string(&event).unwrap();
@@ -150,13 +144,10 @@ pub async fn stream_audit(
                 Box::new(tokio_stream::once(Ok(Event::default().data(data))))
             }
 
-            // ── In-progress: subscribe to live broadcast channel
             _ => {
                 if let Some(tx) = state.audit_events.get(&id) {
                     let rx = tx.subscribe();
 
-                    // Send an immediate confirmation so the client knows
-                    // the SSE connection is live and the stream is active.
                     let initial_event = AuditEvent::StatusUpdate {
                         stage: "running".into(),
                         message: "Connected to live audit stream".into(),
@@ -175,10 +166,6 @@ pub async fn stream_audit(
 
                     Box::new(initial_stream.chain(broadcast))
                 } else {
-                    // Sender is gone but DB still shows queued/running.
-                    // This is a tiny race window: pipeline completed and cleaned
-                    // up the sender between our DB read and the DashMap lookup.
-                    // Wait briefly then re-query for the final status.
                     tokio::time::sleep(Duration::from_millis(500)).await;
 
                     let final_status = sqlx::query_scalar!(

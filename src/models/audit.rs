@@ -1,3 +1,4 @@
+use chrono::{Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -42,14 +43,26 @@ pub struct AuditJob {
     pub contract_id: Uuid,
     pub contract_name: String,
     pub source_code: String,
+    pub language: String,
     pub vuln_class_tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SeverityBreakdown {
+    pub high: usize,
+    pub medium: usize,
+    pub low: usize,
+    pub informational: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuditReport {
-    pub slither_findings_count: usize,
-    pub memory_matches_count: usize,
-    // Add other fields as needed for the final report
+    pub vulnerability_count: usize,
+    pub severity_breakdown: SeverityBreakdown,
+    pub call_graph: serde_json::Value,
+    pub bounty_estimate_usd: u64,
+    pub badge_id: Option<Uuid>,
+    pub chain: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -58,6 +71,6 @@ pub struct AuditListRow {
     pub contract_id: Uuid,
     pub contract_name: String,
     pub status: String,
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: time::OffsetDateTime,
+    #[serde(with = "chrono::serde::ts_seconds")]
+    pub created_at: chrono::DateTime<Utc>,
 }

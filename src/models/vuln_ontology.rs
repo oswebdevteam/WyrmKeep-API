@@ -3,15 +3,21 @@ use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub enum VulnClass {
-    Reentrancy,              // SWC-107
-    AccessControl,           // SWC-105, SWC-106
-    ArithmeticOverflow,      // SWC-101
-    UncheckedReturn,         // SWC-104
-    TxOriginAuth,            // SWC-115
-    UnprotectedSelfDestruct, // SWC-106
-    FrontRunning,            // SWC-114
-    TimestampDependence,     // SWC-116
-    DelegateCallInjection,   // SWC-112
+    Reentrancy,
+    AccessControl,
+    ArithmeticOverflow,
+    UncheckedReturn,
+    TxOriginAuth,
+    UnprotectedSelfDestruct,
+    FrontRunning,
+    TimestampDependence,
+    DelegateCallInjection,
+    FlashLoanManipulation,
+    PriceOracleManipulation,
+    MissingSigner,
+    PdaSeedCollision,
+    FeltOverflow,
+    ValidatorBypass,
     Other(String),
 }
 
@@ -38,7 +44,7 @@ pub enum EdgeRelation {
 pub struct VulnNode {
     pub id: Uuid,
     pub node_type: VulnNodeType,
-    pub label: String,       // anonymized: "fn_0", "var_1"
+    pub label: String,
     pub metadata: serde_json::Value,
 }
 
@@ -55,4 +61,25 @@ pub struct AbstractPattern {
     pub severity: String,
     pub nodes: Vec<VulnNode>,
     pub edges: Vec<VulnEdge>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AttackStep {
+    pub order: u32,
+    pub function_name: String,
+    pub action: String,
+    pub line_range: Option<LineRange>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LineRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CodeDiff {
+    pub original: String,
+    pub patched: String,
+    pub description: String,
 }

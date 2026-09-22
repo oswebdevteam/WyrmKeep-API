@@ -10,9 +10,14 @@ pub struct Finding {
     pub vuln_class: String,
     pub severity: FindingSeverity,
     pub description: String,
-    pub affected_functions: serde_json::Value, // JSONB array
+    pub affected_functions: serde_json::Value,
     pub causal_chain: Option<serde_json::Value>,
     pub historical_matches: i32,
+    pub plain_english: Option<String>,
+    pub suggested_fix: Option<serde_json::Value>,
+    pub attack_path: Option<serde_json::Value>,
+    pub bounty_estimate_usd: Option<i64>,
+    pub confidence: Option<f32>,
     pub created_at: DateTime<Utc>,
 }
 

@@ -10,10 +10,10 @@ use thiserror::Error;
 pub enum AppError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
-    #[error("cognee error: {0}")]
-    Cognee(#[from] anyhow::Error),
-    #[error("sidecar error: {0}")]
-    Sidecar(String),
+    #[error("analysis error: {0}")]
+    Analysis(String),
+    #[error("llm error: {0}")]
+    Llm(String),
     #[error("not found: {0}")]
     NotFound(String),
     #[error("unauthorized")]
@@ -45,20 +45,20 @@ impl IntoResponse for AppError {
                     "Internal server error".to_string(),
                 )
             }
-            AppError::Cognee(e) => {
-                tracing::error!("Cognee error: {}", e);
+            AppError::Analysis(msg) => {
+                tracing::error!("Analysis error: {}", msg);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "COGNEE_ERROR",
-                    "Internal server error".to_string(),
+                    "ANALYSIS_ERROR",
+                    "Contract analysis failed".to_string(),
                 )
             }
-            AppError::Sidecar(msg) => {
-                tracing::error!("Sidecar error: {}", msg);
+            AppError::Llm(msg) => {
+                tracing::error!("LLM error: {}", msg);
                 (
                     StatusCode::BAD_GATEWAY,
-                    "SIDECAR_ERROR",
-                    "Sidecar service error".to_string(),
+                    "LLM_ERROR",
+                    "LLM enrichment failed".to_string(),
                 )
             }
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", msg),

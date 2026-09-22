@@ -5,17 +5,14 @@ use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 use crate::config::AppConfig;
-use crate::error::AppError;
 use crate::models::audit::AuditJob;
-use crate::services::{cognee_client::CogneeClient, sidecar_client::SidecarClient};
-
 use crate::routes::audits::AuditEvent;
+use crate::services::llm_client::LlmClient;
 
 pub struct AppStateInner {
     pub pool: PgPool,
     pub config: Arc<AppConfig>,
-    pub cognee_client: CogneeClient,
-    pub sidecar_client: SidecarClient,
+    pub llm_client: LlmClient,
     pub job_tx: mpsc::Sender<AuditJob>,
     pub audit_events: DashMap<Uuid, broadcast::Sender<AuditEvent>>,
 }
@@ -24,25 +21,23 @@ pub struct AppStateInner {
 pub struct AppState(Arc<AppStateInner>);
 
 impl AppState {
-    pub async fn new(
+    pub fn new(
         pool: PgPool,
         config: AppConfig,
         job_tx: mpsc::Sender<AuditJob>,
-    ) -> Result<Self, AppError> {
-        let config_arc = Arc::new(config.clone());
-        let sidecar_client = SidecarClient::new(&config);
-        let cognee_client = CogneeClient::new(&config).await?;
+    ) -> Self {
+        let config = Arc::new(config);
+        let llm_client = LlmClient::new(Arc::clone(&config));
 
         let inner = AppStateInner {
             pool,
-            config: config_arc,
-            cognee_client,
-            sidecar_client,
+            config,
+            llm_client,
             job_tx,
             audit_events: DashMap::new(),
         };
 
-        Ok(Self(Arc::new(inner)))
+        Self(Arc::new(inner))
     }
 }
 
