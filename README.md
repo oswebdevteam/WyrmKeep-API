@@ -2,119 +2,303 @@
 
 <div align="center">
 
-**A Smart Contract Audit Platform with Memory-Augmented Pattern Recognition**
+**Multi-Language Smart Contract Audit Platform — Native Static Analysis + LLM Enrichment**
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Built with Axum](https://img.shields.io/badge/built%20with-Axum-green.svg)](https://github.com/tokio-rs/axum)
+[![Clippy](https://img.shields.io/badge/clippy-clean-brightgreen.svg)](https://github.com/rust-lang/rust-clippy)
 
 </div>
 
-
 ---
 
-##  Overview
+## Overview
 
-WyrmKeep is a next-generation smart contract auditing platform that combines traditional static analysis with memory-augmented pattern recognition. It leverages historical vulnerability data to identify security issues in smart contracts with unprecedented accuracy.
+WyrmKeep is a smart contract auditing platform. Upload a contract, queue an audit, and watch results stream in over Server-Sent Events: an in-process detection engine (57 rules across 7 languages) finds candidate vulnerabilities, an LLM enriches each finding with a plain-English explanation and a suggested fix, and the pipeline mints a verifiable audit badge with a SHA-256 certificate hash.
 
 ### Key Capabilities
 
-- **Automated Vulnerability Detection**: Integrates with Slither for comprehensive static analysis
-- **Pattern Extraction**: Converts vulnerability findings into abstract graph patterns
-- **Memory-Augmented Recall**: Uses Cognee for semantic search across historical vulnerabilities
-- **Real-time Streaming**: Server-Sent Events (SSE) for live audit progress updates
-- **Multi-tenant Architecture**: Secure isolation with JWT and API key authentication
-- **Production-Ready**: Cursor-based pagination, CORS, compression, timeouts, and request tracing
+- **Native multi-language detection**: 57 `DetectionRule`s for Solidity, Rust/Solana, Move, Cairo, Aiken, Compact, and Quorlin — no external analyzer required
+- **LLM enrichment**: per-finding plain-English explanations and `PATCHED:`/`EXPLANATION:` fix suggestions (OpenRouter-compatible, failures degrade gracefully to rule hints)
+- **Bounty estimation**: deterministic High/Medium/Low/Informational payout table
+- **Audit badges**: NFT-style metadata + `sha256(audit_id ‖ report)` certificate, publicly verifiable
+- **Call graphs & attack paths**: nodes/edges derived from each finding's attack path
+- **Real-time streaming**: SSE broadcast per audit (`analysis_started` → `report_ready`)
+- **Multi-tenant**: JWT + API-key auth, tenant-scoped queries, admin-only tenant creation
+- **Production-ready**: cursor pagination, rate limiting, CORS, Brotli compression, 30s timeouts, request IDs, tracing
+
+> **Note on stale docs:** `SPEC_COMPLIANCE_REPORT.md` (2026-07-04) describes an older Slither-sidecar + Cognee-memory design. That design is not implemented: there is no `sidecar_client`/`cognee_client`, no `/v1/memory/*` endpoints, and the `slither_raw` / `abstract_pattern` / `memory_matches` columns are legacy leftovers. This README describes the code as it exists.
 
 ---
 
-##  Features
+## Architecture
 
-###  Smart Contract Analysis
-
-- **Slither Integration**: Comprehensive vulnerability scanning
-- **Pattern Abstraction**: Automated extraction of vulnerability patterns into graph structures
-- **Historical Context**: Matches current vulnerabilities against known exploit patterns
-- **Causal Chain Analysis**: Tracks the flow of vulnerable operations
-
-###  Security & Multi-tenancy
-
-- **JWT Authentication**: Secure token-based auth
-- **API Key Support**: Alternative authentication for machine-to-machine
-- **Tenant Isolation**: Complete data segregation per tenant
-- **Role-Based Access**: Admin and tenant-level permissions
-
-###  Advanced Features
-
-- **Real-time Streaming**: SSE for audit progress updates
-- **Dataset Management**: Separate shared, private, and session memory datasets
-- **Pagination**: Efficient cursor-based pagination for all list endpoints
-- **GDPR Compliance**: Complete memory cleanup capabilities
-
-###  Production-Ready
-
-- **Request Tracing**: Unique request IDs for debugging
-- **Compression**: Brotli compression for all responses
-- **CORS Support**: Configurable cross-origin resource sharing
-- **Health Checks**: Standard `/health` endpoint
-- **Database Migrations**: Automatic schema management
-
----
-
-##  Architecture
+### System diagram
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    API Layer (Axum)                     │
-│  ┌──────────────┬──────────────┬─────────────────────┐ │
-│  │  Auth        │  Routes      │  Middleware         │ │
-│  │  Middleware  │  Handlers    │  (CORS, Trace, etc) │ │
-│  └──────────────┴──────────────┴─────────────────────┘ │
-└─────────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────────┐
-│                   Business Logic Layer                  │
-│  ┌──────────────────────┬──────────────────────────┐   │
-│  │  Audit Pipeline      │  Pattern Abstractor      │   │
-│  │  - Slither Analysis  │  - Graph Extraction      │   │
-│  │  - Memory Ops        │  - Edge Inference        │   │
-│  │  - Report Generation │  - Anonymization         │   │
-│  └──────────────────────┴──────────────────────────┘   │
-└─────────────────────────────────────────────────────────┘
-                            │
-          ┌─────────────────┼─────────────────┐
-          ▼                 ▼                 ▼
-┌─────────────────┐  ┌──────────────┐  ┌──────────────┐
-│   PostgreSQL    │  │   Cognee     │  │   Sidecar    │
-│   (Supabase)    │  │   Memory     │  │   Service    │
-│                 │  │   Store      │  │   (Slither)  │
-│  - Tenants      │  │              │  │              │
-│  - Contracts    │  │  - Patterns  │  │  - Analysis  │
-│  - Audits       │  │  - Recall    │  │  - Detection │
-│  - Findings     │  │  - Datasets  │  │              │
-└─────────────────┘  └──────────────┘  └──────────────┘
+                         ┌────────────────────────────────────────┐
+                         │              Axum router               │
+                         │  /health   /v1/badges/verify/* (public)│
+                         │  /v1/* (AuthUser: JWT or X-API-Key)    │
+                         │  Timeout(30s) · RateLimit · CORS       │
+                         │  Compression · Trace · RequestId       │
+                         └───────────────┬────────────────────────┘
+                                         │
+                    ┌────────────────────┼────────────────────┐
+                    ▼                    ▼                    ▼
+           ┌────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+           │    routes/     │  │  AuditPipeline  │  │   job_queue     │
+           │ tenants,       │  │  run(job)       │  │ mpsc ch (100)   │
+           │ contracts,     │  │  9 stages,      │◄─┤ per-job spawn   │
+           │ audits (+SSE), │  │  emits          │  │ logs errors     │
+           │ findings,      │  │  broadcast events│ └─────────────────┘
+           │ call_graph,    │  └────────┬────────┘
+           │ badges         │           │
+           └────────────────┘           ▼
+                    ┌──────────────────────────────────────┐
+                    │            AnalysisEngine            │
+                    │  rules_for(language) → rule.detect() │
+                    │  RuleMatch → DetectedVulnerability   │
+                    └──────┬───────────────┬───────────────┘
+                           ▼               ▼
+                  ┌─────────────────┐ ┌──────────────────┐
+                  │ LlmClient       │ │ BountyEstimator  │
+                  │ explain + fix   │ │ 50k/10k/1k/0 USD │
+                  │ (OpenRouter,    │ └────────┬─────────┘
+                  │  60s, best-     │          ▼
+                  │  effort)        │ ┌──────────────────┐
+                  └────────┬────────┘ │  BadgeIssuer     │
+                           ▼         │  grade + sha256  │
+                  ┌─────────────────┐│  audit_badges    │
+                  │   PostgreSQL    │└──────────────────┘
+                  │ tenants         │
+                  │ contracts       │
+                  │ audits (report) │
+                  │ findings        │
+                  │ audit_badges    │
+                  └─────────────────┘
 ```
 
-### Technology Stack
+### Audit pipeline sequence
 
-- **Framework**: Axum 0.7 (Tokio-based async web framework)
-- **Database**: PostgreSQL 14+ (via Supabase)
-- **ORM**: SQLx (compile-time verified queries)
-- **Authentication**: JWT + Argon2 password hashing
-- **Memory System**: Cognee (graph-based knowledge storage)
-- **Analysis Engine**: Slither (via sidecar service)
-- **Middleware**: Tower HTTP (compression, CORS, tracing, timeouts)
+`POST /v1/audits` inserts a `queued` row and pushes an `AuditJob` onto the mpsc queue. The background worker spawns `AuditPipeline::run`, which executes these stages in order, emitting an SSE event after each:
+
+```
+create_audit → [queued] ──mpsc──► worker ──spawn──► pipeline
+  1. status → running; emit status_update{starting}
+  2. parse ContractLanguage; emit analysis_started{language}
+  3. AnalysisEngine::analyze() in-process; emit analysis_complete{count, elapsed_ms}
+  4. build nodes/edges/attack_paths from vuln.attack_path; emit call_graph_ready
+  5. severity counts; emit pattern_extracted{node_count, edge_count} (call-graph counts)
+  6. BountyEstimator::estimate() total
+  7. per finding: emit enrichment_started → extract snippet →
+     llm.explain_vulnerability().ok() → llm.suggest_fix().ok()
+     (fallback: rule fix_hint) → INSERT INTO findings → emit enrichment_complete
+  8. BadgeIssuer::issue().ok() → final report (badge_id or None)
+  9. UPDATE audits SET report, status=complete; emit report_ready{audit_id}
+```
+
+### Detection engine internals
+
+```
+source: &str ──► rules_for(&ContractLanguage) ──► Vec<Box<dyn DetectionRule>>
+                                                        │ .detect(source)
+                                                        ▼
+                                              Vec<RuleMatch> { check_name, vuln_class,
+                                                severity, description, affected_lines,
+                                                affected_functions, confidence,
+                                                action_hint, fix_hint }
+                                                        │ engine maps each match
+                                                        ▼
+                                    DetectedVulnerability { + attack_path: Vec<AttackStep>,
+                                      suggested_fix: Option<CodeDiff> }  (sorted High → Info)
+```
+
+```rust
+// src/services/analyzer/rules.rs
+pub trait DetectionRule: Send + Sync {
+    fn check_name(&self) -> &str;
+    fn detect(&self, source: &str) -> Vec<RuleMatch>;
+}
+
+pub fn rules_for(language: &ContractLanguage) -> Vec<Box<dyn DetectionRule>> {
+    match language {
+        ContractLanguage::Solidity => solidity_rules(),
+        ContractLanguage::Rust => rust_solana_rules(),
+        ContractLanguage::Move => move_rules(),
+        ContractLanguage::Cairo => cairo_rules(),
+        ContractLanguage::Aiken => aiken_rules(),
+        ContractLanguage::Compact => compact_rules(),
+        ContractLanguage::Quorlin => quorlin_rules(),
+    }
+}
+```
+
+```rust
+// src/services/analyzer/engine.rs
+impl AnalysisEngine {
+    pub fn analyze(source: &str, language: &ContractLanguage) -> Vec<DetectedVulnerability> {
+        let rule_set = rules::rules_for(language);
+        let mut vulnerabilities = Vec::new();
+        for rule in &rule_set {
+            let matches = rule.detect(source);
+            for m in matches {
+                vulnerabilities.push(Self::match_to_vulnerability(m, source));
+            }
+        }
+        vulnerabilities.sort_by(|a, b| {
+            severity_ordinal(&a.severity).cmp(&severity_ordinal(&b.severity))
+        });
+        vulnerabilities
+    }
+}
+```
+
+### Data model
+
+```
+tenants (id PK, name UNIQUE, api_key_hash, created_at)
+   │ 1──∞ contracts (id PK, tenant_id FK⤷CASCADE, name, source_hash,
+   │                 source_code, language DEFAULT 'solidity', uploaded_at)
+   │ 1──∞ audits (id PK, tenant_id, contract_id, status DEFAULT 'queued',
+   │              report JSONB, error_message, created_at, completed_at)
+   │              ├──∞ findings (id PK, audit_id FK⤷CASCADE, tenant_id, vuln_class,
+   │              │              severity, description, affected_functions JSONB,
+   │              │              causal_chain JSONB, historical_matches, plain_english,
+   │              │              suggested_fix JSONB, attack_path JSONB,
+   │              │              bounty_estimate_usd, confidence)
+   │              └──∞ audit_badges (id PK, audit_id FK⤷CASCADE, tenant_id,
+                                     contract_name, certificate_hash UNIQUE,
+                                     grade, vulnerability_count, high_severity_count,
+                                     chain DEFAULT 'solidity', issued_at, metadata_json)
+```
+
+### Technology stack
+
+- **Framework**: Axum 0.7 on Tokio (multipart, SSE, typed headers)
+- **Database**: PostgreSQL 14+ (Supabase-ready) via SQLx 0.8 (compile-time checked queries, migrations run on boot)
+- **Auth**: JWT (HS256, 24h) + Argon2id-hashed API keys; `tower_governor` rate limiting
+- **Analysis**: native Rust rule engine (`services/analyzer`) — no external binaries
+- **LLM**: OpenRouter-compatible chat API (`google/gemini-2.5-flash`, 1024 tokens, temp 0.3)
+- **Middleware**: Tower HTTP (Brotli compression, CORS, trace, timeout, request IDs), `DashMap` broadcast registry for SSE
 
 ---
 
-##  Quick Start
+## Detection Rules
+
+Languages are parsed case-insensitively with chain aliases (`src/models/contract.rs`):
+
+| Language | Aliases | Rules |
+|---|---|---|
+| Solidity (default) | `sol` | 15 |
+| Rust / Solana | `rs`, `solana`, `anchor` | 9 |
+| Move | `aptos`, `sui` | 6 |
+| Cairo | `starknet` | 6 |
+| Aiken | `cardano` | 6 |
+| Compact | `midnight` | 4 |
+| Quorlin | `kortana` | 11 |
+
+Full check-name catalog (`rule.detect()` → `RuleMatch.check_name`):
+
+| Language | Check names |
+|---|---|
+| Solidity | `reentrancy-eth`, `unchecked-return`, `tx-origin`, `access-control`, `arithmetic-overflow`, `timestamp-dependence`, `delegatecall-injection`, `flash-loan-manipulation`, `price-oracle-manipulation`, `unprotected-mint`, `signature-replay`, `signature-malleability`, `cross-chain-replay`, `erc4626-share-inflation`, `unbounded-loop-dos` |
+| Rust / Solana | `missing-signer-check`, `pda-seed-collision`, `rust-arithmetic-overflow`, `missing-owner-check`, `unchecked-account-owner`, `missing-rent-exemption`, `unchecked-account-type`, `unvalidated-remaining-accounts`, `non-canonical-bump` |
+| Move | `move-arithmetic`, `move-missing-acquires`, `move-unprotected-entry`, `move-unconstrained-shared-object`, `move-missing-access-check`, `move-public-mutator` |
+| Cairo | `felt-overflow`, `cairo-reentrancy`, `cairo-unprotected-storage-write`, `cairo-missing-event`, `cairo-unprotected-upgrade`, `cairo-unsafe-unwrap` |
+| Aiken | `validator-bypass`, `aiken-datum-hijack`, `aiken-double-satisfaction`, `aiken-missing-boundary-validation`, `aiken-missing-signatory`, `aiken-unchecked-time-range` |
+| Compact | `compact-state-leak`, `compact-private-state-leak`, `compact-witness-exposure`, `compact-underconstrained-action` |
+| Quorlin | `quorlin-permission`, `QL-AC-01`, `QL-AC-02`, `QL-AC-03`, `QL-AC-04`, `QL-IV-01`, `QL-IV-03`, `QL-RE-01`, `QL-RE-03`, `QL-EV-01`, `QL-WA-01` |
+
+Example — a rule is a pure function over source text (`src/services/analyzer/rules.rs`):
+
+```rust
+struct TxOriginRule;
+
+impl DetectionRule for TxOriginRule {
+    fn check_name(&self) -> &str { "tx-origin" }
+
+    fn detect(&self, source: &str) -> Vec<RuleMatch> {
+        let mut matches = Vec::new();
+        let lines: Vec<&str> = source.lines().collect();
+
+        for (i, line) in lines.iter().enumerate() {
+            if !line.contains("tx.origin") { continue; }
+            let in_condition = line.contains("require(")
+                || line.contains("if (") || line.contains("if(")
+                || line.contains("assert(");
+            if !in_condition { continue; }
+            let fn_name = find_enclosing_function(&lines, i)
+                .unwrap_or_else(|| "<unknown>".into());
+            matches.push(RuleMatch {
+                check_name: self.check_name().into(),
+                vuln_class: VulnClass::TxOriginAuth,
+                severity: FindingSeverity::High,
+                description: format!(
+                    "Use of `tx.origin` for authorization in `{}`. \
+                     A phishing contract can relay calls and pass the tx.origin check.",
+                    fn_name
+                ),
+                affected_lines: vec![LineRange {
+                    start: i as u32 + 1,
+                    end: i as u32 + 1,
+                }],
+                affected_functions: vec![fn_name],
+                confidence: 0.95,
+                action_hint: Some("read_state".into()),
+                fix_hint: Some(FixHint {
+                    patched: "require(msg.sender == owner, \"Not authorized\");".into(),
+                    explanation: "Replace tx.origin with msg.sender for authorization checks.".into(),
+                }),
+            });
+        }
+        matches
+    }
+}
+```
+
+### Bounty estimation
+
+Deterministic per-severity table (`src/services/bounty_estimator.rs`):
+
+```rust
+// High: $50,000 · Medium: $10,000 · Low: $1,000 · Informational: $0
+BountyEstimator::default().estimate(&vulnerabilities) // -> u64 total USD
+```
+
+### Badge issuance
+
+```rust
+// src/services/pipeline.rs — badge failure is non-fatal (.ok()), the report
+// is persisted with badge_id: None instead
+let badge_id = BadgeIssuer::issue(
+    &pool,
+    BadgeIssueParams {
+        audit_id,
+        tenant_id,
+        contract_name: &job.contract_name,
+        chain: &chain,                 // ContractLanguage::to_string()
+        report_json: &report_json,
+        vulnerability_count: total as i32,
+        high_severity_count: high as i32,
+        medium_severity_count: medium as i32,
+    },
+)
+.await
+.ok();
+```
+
+Grade comes from `AuditGrade::from_counts(high, medium)`; `certificate_hash = sha256(audit_id ‖ report_json)`; metadata is NFT-style JSON (`name`, `description`, `attributes`, `external_url: https://wyrmkeep.io/verify/{hash}`).
+
+---
+
+## Quick Start
 
 ### Prerequisites
 
 - Rust 1.75+
 - PostgreSQL 14+ (or Supabase account)
-- CMake, Ninja, Protocol Buffers compiler (for dependencies)
 
 ### Installation
 
@@ -130,13 +314,13 @@ WyrmKeep is a next-generation smart contract auditing platform that combines tra
    # Edit .env with your database URL and API keys
    ```
 
-3. **Configure Supabase (or local PostgreSQL):**
-   
+3. **Configure the database:**
+
    Get your connection string from Supabase:
    - Dashboard → Settings → Database → Connection String (URI)
    - Add to `.env` as `DATABASE_URL`
 
-4. **Run migrations (automatic on startup):**
+4. **Run the server (migrations run automatically on boot):**
    ```bash
    cargo run
    ```
@@ -161,9 +345,36 @@ Expected response:
 }
 ```
 
+### End-to-end audit in 4 calls
+
+```bash
+TOKEN=...  # JWT from tenant creation, or use X-API-Key: <tenant_id>.<raw_key>
+
+# 1. Upload
+CID=$(curl -s -X POST http://localhost:8000/v1/contracts \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "name=MyToken" -F "file=@contracts/MyToken.sol" -F "language=solidity" \
+  | jq -r .data.id)
+
+# 2. Queue audit (202 Accepted)
+AID=$(curl -s -X POST http://localhost:8000/v1/audits \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"contract_id\":\"$CID\"}" | jq -r .audit_id)
+
+# 3. Stream progress (SSE) until report_ready
+curl -N http://localhost:8000/v1/audits/$AID/stream \
+  -H "Authorization: Bearer $TOKEN"
+
+# 4. Fetch report, findings, call graph, badge
+curl http://localhost:8000/v1/audits/$AID/report -H "Authorization: Bearer $TOKEN"
+curl "http://localhost:8000/v1/findings?limit=20" -H "Authorization: Bearer $TOKEN"
+curl http://localhost:8000/v1/audits/$AID/call-graph -H "Authorization: Bearer $TOKEN"
+```
+
 ---
 
-##  API Documentation
+## API Documentation
 
 ### Base URL
 
@@ -171,7 +382,7 @@ Expected response:
 http://localhost:8000/v1
 ```
 
-All endpoints return JSON and include a `request_id` field for tracing.
+All endpoints return JSON and include a `request_id` field for tracing. All `/v1/*` routes except badge verification require auth.
 
 ### Authentication
 
@@ -184,12 +395,35 @@ Authorization: Bearer <jwt_token>
 
 **2. API Key:**
 ```bash
-X-API-Key: <tenant_id>.<api_key>
+X-API-Key: <tenant_id>.<raw_api_key>
 ```
+
+Rate limiting: 1 req/s, burst 10 per tenant (API-key prefix, else JWT prefix, else IP). Creating tenants additionally requires `role == Admin`.
+
+### Route table
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/health` | none | Liveness probe |
+| `POST` | `/v1/tenants` | admin | Create tenant, returns API key + JWT |
+| `GET` | `/v1/tenants/me` | tenant | Current tenant info |
+| `POST` | `/v1/contracts` | tenant | Upload contract (multipart) |
+| `GET` | `/v1/contracts?limit&after` | tenant | List contracts (cursor pagination) |
+| `GET` | `/v1/contracts/:id` | tenant | Get one contract |
+| `POST` | `/v1/audits` | tenant | Queue audit → `202 Accepted` + `audit_id` |
+| `GET` | `/v1/audits?limit&after` | tenant | List audits |
+| `GET` | `/v1/audits/:id/stream` | tenant | SSE progress stream |
+| `GET` | `/v1/audits/:id/report` | tenant | Final audit report |
+| `GET` | `/v1/audits/:id/call-graph` | tenant | Nodes, edges, attack paths |
+| `GET` | `/v1/findings?limit&after` | tenant | List findings |
+| `GET` | `/v1/findings/:id/chain` | tenant | Causal chain for a finding |
+| `GET` | `/v1/badges?limit&after` | tenant | List badges |
+| `GET` | `/v1/badges/:id` | tenant | Get badge by id **or** audit id |
+| `GET` | `/v1/badges/verify/:certificate_hash` | none | Public badge verification |
 
 ---
 
-##  Authentication Endpoints
+## Authentication Endpoints
 
 ### Health Check
 
@@ -210,7 +444,7 @@ No authentication required.
 
 ---
 
-##  Tenant Management
+## Tenant Management
 
 ### Create Tenant
 
@@ -235,8 +469,6 @@ POST /v1/tenants
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "name": "Acme Security",
     "api_key_hash": "$argon2id$v=19$m=19456,t=2,p=1$...",
-    "cognee_dataset_private": "wyrmkeep:550e8400-...:private",
-    "cognee_dataset_session": "wyrmkeep:550e8400-...:session",
     "created_at": "2026-07-03T12:00:00.000Z"
   },
   "api_key": "your-secret-api-key",
@@ -260,8 +492,6 @@ Returns the authenticated tenant's information.
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "name": "Acme Security",
     "api_key_hash": "$argon2id$...",
-    "cognee_dataset_private": "wyrmkeep:550e8400-...:private",
-    "cognee_dataset_session": "wyrmkeep:550e8400-...:session",
     "created_at": "2026-07-03T12:00:00.000Z"
   },
   "request_id": "123e4567-e89b-12d3-a456-426614174000"
@@ -270,7 +500,7 @@ Returns the authenticated tenant's information.
 
 ---
 
-##  Contract Management
+## Contract Management
 
 ### Upload Contract
 
@@ -284,7 +514,7 @@ Upload a smart contract for auditing.
 **Form Fields:**
 - `name` (required): Contract name
 - `file` or `source_code` (required): Contract source code
-- `language` (optional): Programming language (default: "solidity")
+- `language` (optional): Programming language (default: "solidity"; see language table for aliases)
 
 **Example (curl):**
 ```bash
@@ -369,7 +599,7 @@ Retrieve a specific contract by ID.
 
 ---
 
-##  Audit Management
+## Audit Management
 
 ### Create Audit
 
@@ -377,15 +607,17 @@ Retrieve a specific contract by ID.
 POST /v1/audits
 ```
 
-Start a new security audit for a contract.
+Start a new security audit for a contract. Returns `202 Accepted` and enqueues an `AuditJob` on the background worker.
 
 **Request Body:**
 ```json
 {
   "contract_id": "650e8400-e29b-41d4-a716-446655440000",
-  "vuln_class_tags": ["reentrancy", "access-control", "solidity"]
+  "vuln_class_tags": ["all"]
 }
 ```
+
+(`vuln_class_tags` defaults to `["all"]` when omitted.)
 
 **Response:**
 ```json
@@ -403,73 +635,46 @@ GET /v1/audits/:id/stream
 Content-Type: text/event-stream
 ```
 
-Real-time Server-Sent Events stream for audit progress.
+Real-time Server-Sent Events stream backed by a per-audit broadcast channel (buffer 100, 15s keep-alive). If the audit is already `complete`/`failed`, the stream replays the terminal event immediately; otherwise it sends a `status_update{running}` greeting and tails live events.
 
-**Event Types:**
+**Event types** (`src/routes/audits.rs` — `AuditEvent`, `snake_case` tagged):
 
-**Status Update:**
-```json
-{
-  "type": "status_update",
-  "stage": "starting",
-  "message": "Audit initiated"
-}
-```
+| `type` | Payload | Meaning |
+|---|---|---|
+| `status_update` | `stage`, `message` | Lifecycle marker (`starting`, `running`, greeting) |
+| `analysis_started` | `language` | Detection engine started |
+| `analysis_complete` | `vulnerability_count`, `elapsed_ms` | Native analysis finished |
+| `pattern_extracted` | `node_count`, `edge_count` | Call-graph counts |
+| `enrichment_started` | `finding_index`, `total` | LLM enrichment of finding N began |
+| `enrichment_complete` | `finding_index` | Finding N persisted |
+| `call_graph_ready` | `node_count`, `edge_count` | Graph materialized |
+| `report_ready` | `audit_id` | Report persisted, stream terminal |
+| `error` | `message` | Terminal failure |
 
-**Slither Complete:**
-```json
-{
-  "type": "slither_complete",
-  "finding_count": 5
-}
-```
+Consume it (browsers can't set `Authorization` on native `EventSource`, so stream via `fetch`):
 
-**Pattern Extracted:**
-```json
-{
-  "type": "pattern_extracted",
-  "node_count": 12,
-  "edge_count": 8
-}
-```
-
-**Memory Ingested:**
-```json
-{
-  "type": "memory_ingested",
-  "dataset": "wyrmkeep:shared:patterns"
-}
-```
-
-**Cognify Complete:**
-```json
-{
-  "type": "cognify_complete",
-  "elapsed_ms": 1500
-}
-```
-
-**Recall Complete:**
-```json
-{
-  "type": "recall_complete",
-  "match_count": 3
-}
-```
-
-**Report Ready:**
-```json
-{
-  "type": "report_ready",
-  "audit_id": "750e8400-e29b-41d4-a716-446655440000"
-}
-```
-
-**Error:**
-```json
-{
-  "type": "error",
-  "message": "Analysis failed: ..."
+```js
+// Same-origin proxy or backend route forwards the Authorization header.
+const res = await fetch(`/v1/audits/${auditId}/stream`, {
+  headers: { Authorization: `Bearer ${token}` },
+});
+const reader = res.body.getReader();
+const decoder = new TextDecoder();
+let buf = "";
+for (;;) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  buf += decoder.decode(value, { stream: true });
+  for (const chunk of buf.split("\n\n")) {
+    const line = chunk.split("\n").find((l) => l.startsWith("data:"));
+    if (!line) continue;
+    const evt = JSON.parse(line.slice(5));
+    if (evt.type === "report_ready") {
+      reader.cancel();
+      fetchReport(evt.audit_id);
+    }
+  }
+  buf = buf.slice(buf.lastIndexOf("\n\n") + 2);
 }
 ```
 
@@ -479,19 +684,29 @@ Real-time Server-Sent Events stream for audit progress.
 GET /v1/audits/:id/report
 ```
 
-Retrieve the final audit report.
+Retrieve the final audit report (vulnerability counts, severity breakdown, call graph, bounty total, badge id).
+
+### Get Call Graph
+
+```http
+GET /v1/audits/:id/call-graph
+```
+
+Nodes, edges, and attack paths extracted from the stored report.
 
 **Response:**
 ```json
 {
-  "slither_findings_count": 5,
-  "memory_matches_count": 3
+  "nodes": [...],
+  "edges": [...],
+  "attack_paths": [...],
+  "request_id": "123e4567-e89b-12d3-a456-426614174000"
 }
 ```
 
 ---
 
-##  Findings
+## Findings
 
 ### List Findings
 
@@ -499,7 +714,7 @@ Retrieve the final audit report.
 GET /v1/findings?limit=20&after=<cursor>
 ```
 
-List vulnerability findings with pagination.
+List vulnerability findings with pagination. Each row carries the detector output plus enrichment: `plain_english`, `suggested_fix`, `attack_path`, `bounty_estimate_usd`, and `confidence`.
 
 **Query Parameters:**
 - `limit` (optional): Number of results (default: 20)
@@ -547,90 +762,37 @@ Retrieve the detailed causal chain for a finding.
 
 ---
 
-##  Memory Operations
+## Badges
 
-### Recall Memory
+Audits mint a badge row (`audit_badges`) with an NFT-style `metadata_json` and a unique `certificate_hash`. Verification is public — no auth required.
 
-```http
-POST /v1/memory/recall
-```
-
-Query the memory system for similar vulnerability patterns.
-
-**Request Body:**
-```json
-{
-  "query": "reentrancy pattern in withdraw function",
-  "top_k": 5,
-  "scope": "shared"
-}
-```
-
-**Scopes:**
-- `shared`: Query shared vulnerability patterns (default)
-- `private`: Query tenant-specific patterns
-- `session`: Query current session patterns
-
-**Response:**
-```json
-{
-  "data": [
-    {
-      "id": "950e8400-e29b-41d4-a716-446655440000",
-      "content": "VulnClass: Reentrancy\nSeverity: High\n...",
-      "score": 0.95
-    }
-  ],
-  "request_id": "123e4567-e89b-12d3-a456-426614174000"
-}
-```
-
-### Prune Memory
+### List Badges
 
 ```http
-DELETE /v1/memory/prune
+GET /v1/badges?limit=20&after=<cursor>
 ```
 
-Delete all private and session memory for the authenticated tenant (GDPR compliance).
-
-**Response:**
-```
-204 No Content
-```
-
-### Memory Statistics
+### Get Badge
 
 ```http
-GET /v1/memory/stats
+GET /v1/badges/:id
 ```
 
-Get memory dataset statistics.
+Matches by badge `id` **or** `audit_id`.
 
-**Response:**
-```json
-{
-  "shared_patterns": {
-    "name": "wyrmkeep:shared:patterns",
-    "nodes": 1250,
-    "edges": 3400
-  },
-  "private_dataset": {
-    "name": "wyrmkeep:550e8400-...:private",
-    "nodes": 45,
-    "edges": 120
-  },
-  "session_dataset": {
-    "name": "wyrmkeep:550e8400-...:session",
-    "nodes": 12,
-    "edges": 30
-  },
-  "request_id": "123e4567-e89b-12d3-a456-426614174000"
-}
+### Verify Badge (public)
+
+```http
+GET /v1/badges/verify/:certificate_hash
+```
+
+```bash
+curl http://localhost:8000/v1/badges/verify/<certificate_hash>
 ```
 
 ---
 
-##  Configuration
+## Configuration
 
 ### Environment Variables
 
@@ -646,12 +808,9 @@ PORT=8000
 # JWT Configuration
 JWT_SECRET=your-super-secret-jwt-key-min-32-chars
 
-# Cognee Sidecar Configuration
-COGNEE_SIDECAR_URL=http://localhost:8080
-COGNEE_SIDECAR_TOKEN=your-sidecar-auth-token
-
-# LLM API Configuration
+# LLM Configuration (OpenRouter-compatible)
 LLM_API_KEY=your-llm-api-key
+LLM_BASE_URL=https://openrouter.ai/api/v1
 ```
 
 ### Configuration Reference
@@ -661,41 +820,56 @@ LLM_API_KEY=your-llm-api-key
 | `DATABASE_URL` | Yes | PostgreSQL connection string | `postgresql://user:pass@host:5432/db` |
 | `PORT` | No | Server port (default: 8000) | `8000` |
 | `JWT_SECRET` | Yes | Secret for JWT signing (32+ chars) | `your-secret-key-here` |
-| `COGNEE_SIDECAR_URL` | Yes | Cognee sidecar service URL | `http://localhost:8080` |
-| `COGNEE_SIDECAR_TOKEN` | Yes | Authentication token for sidecar | `your-token` |
-| `LLM_API_KEY` | Yes | LLM service API key | `sk-...` |
+| `LLM_API_KEY` | Yes | Bearer key for the chat-completions API | `sk-...` |
+| `LLM_BASE_URL` | No | Chat API base URL (default: OpenRouter) | `https://openrouter.ai/api/v1` |
+
+`AppConfig` (`src/config.rs`) only owns the last three; `DATABASE_URL`/`PORT` are read in `main.rs`. Pool defaults: 10 max connections, 10s acquire timeout, migrations via `sqlx::migrate!` on boot.
+
+### Error model
+
+`AppError` (`src/error.rs`) maps to `{code, message}` JSON: `DATABASE_ERROR`/`ANALYSIS_ERROR`/`INTERNAL_ERROR` → 500 (generic message, detail logged), `LLM_ERROR` → 502, `NOT_FOUND` → 404, `UNAUTHORIZED` → 401, `FORBIDDEN` → 403, `VALIDATION_ERROR` → 400, `CONFLICT` → 409.
 
 ---
 
-##  Development
+## Development
 
 ### Project Structure
 
 ```
 wyrmkeep/
 ├── src/
-│   ├── auth/              # Authentication & middleware
-│   ├── models/            # Data models
-│   ├── routes/            # API route handlers
-│   ├── services/          # Business logic
-│   │   ├── pipeline.rs    # Audit processing pipeline
-│   │   ├── pattern.rs     # Pattern extraction
-│   │   ├── cognee_client.rs
-│   │   └── sidecar_client.rs
-│   ├── config.rs          # Configuration
-│   ├── error.rs           # Error handling
-│   ├── state.rs           # Application state
-│   └── main.rs            # Entry point
-├── migrations/            # Database migrations
+│   ├── auth/              # JWT claims/keys, Argon2 API-key middleware, AuthUser extractor
+│   ├── models/            # audit, badge, contract (ContractLanguage), finding,
+│   │                      #   tenant, vuln_ontology (VulnClass, AttackStep, CodeDiff)
+│   ├── routes/            # audits (+SSE), badges, call_graph, contracts,
+│   │                      #   findings, health, tenants
+│   ├── services/
+│   │   ├── analyzer/      # engine.rs (AnalysisEngine) + rules.rs (57 DetectionRules)
+│   │   ├── pipeline.rs    # AuditPipeline::run — the 9-stage orchestration
+│   │   ├── job_queue.rs   # mpsc background worker
+│   │   ├── llm_client.rs  # OpenRouter chat: explain_vulnerability, suggest_fix
+│   │   ├── bounty_estimator.rs  # 50k/10k/1k/0 table
+│   │   ├── badge_issuer.rs      # BadgeIssueParams → grade + sha256 certificate
+│   │   └── pattern.rs     # Slither-check-name → VulnClass mapper (legacy helper)
+│   ├── bin/migrate.rs     # Migration binary
+│   ├── config.rs          # JWT_SECRET / LLM_API_KEY / LLM_BASE_URL
+│   ├── db/mod.rs          # (stub — SQL is inline sqlx)
+│   ├── error.rs           # AppError → status codes
+│   ├── state.rs           # AppState: pool, config, LlmClient, job_tx, audit_events
+│   ├── lib.rs
+│   └── main.rs            # tracing, pool, migrations, worker, Axum serve
+├── migrations/            # 7 SQL files: tenants, contracts, audits, findings
+│                          #   (+enrichment), badges (+chain column)
+├── examples/test_server.rs# Standalone SSE stub (:8001/test, unrelated to audits)
 ├── Dockerfile
-├── .env.example
 └── README.md
 ```
 
 ### Running Tests
 
 ```bash
-cargo test
+cargo test              # 21 analyzer unit tests (src/services/analyzer/rules.rs)
+cargo test --lib services::analyzer
 ```
 
 ### Code Quality
@@ -704,7 +878,7 @@ cargo test
 # Format code
 cargo fmt
 
-# Lint
+# Lint (must be warning-free: cargo clippy --lib --tests -- -D warnings)
 cargo clippy
 
 # Check compilation
@@ -713,19 +887,18 @@ cargo check
 
 ### Database Migrations
 
-Create a new migration:
+Migrations run automatically on boot (`sqlx::migrate!("./migrations")`). Manual runs:
+
 ```bash
 cargo sqlx migrate add <migration_name>
-```
-
-Run migrations:
-```bash
 cargo sqlx migrate run
 ```
 
+Note: `audits.slither_raw`, `audits.abstract_pattern`, and `audits.memory_matches` are unused legacy columns; tenant `cognee_dataset_*` columns were dropped (`20240102000001`).
+
 ---
 
-##  API Design Principles
+## API Design Principles
 
 1. **RESTful**: Standard HTTP methods and status codes
 2. **Versioned**: All endpoints under `/v1` for future compatibility
@@ -735,18 +908,14 @@ cargo sqlx migrate run
 6. **Documented**: Comprehensive error messages
 7. **Secure**: JWT + API key authentication
 
-
-##  Acknowledgments
+## Acknowledgments
 
 - [Axum](https://github.com/tokio-rs/axum) - Web framework
 - [SQLx](https://github.com/launchbadge/sqlx) - Database toolkit
 - [Tower](https://github.com/tower-rs/tower) - Middleware
-- [Slither](https://github.com/crytic/slither) - Static analyzer
-- [Cognee](https://github.com/topoteretes/cognee) - Memory system
+- [Tokio](https://tokio.rs) - Async runtime (SSE broadcast, job queue)
 
 ---
-
-
 
 <div align="center">
 
