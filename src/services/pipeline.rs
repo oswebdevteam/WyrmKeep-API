@@ -6,7 +6,7 @@ use crate::models::contract::ContractLanguage;
 use crate::models::finding::FindingSeverity;
 use crate::routes::audits::AuditEvent;
 use crate::services::analyzer::AnalysisEngine;
-use crate::services::badge_issuer::BadgeIssuer;
+use crate::services::badge_issuer::{BadgeIssueParams, BadgeIssuer};
 use crate::services::bounty_estimator::BountyEstimator;
 use crate::state::AppState;
 
@@ -200,16 +200,19 @@ impl AuditPipeline {
         let report_json = serde_json::to_value(&report)
             .map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
 
+        let chain = language.to_string();
         let badge_id = BadgeIssuer::issue(
             &self.state.pool,
-            audit_id,
-            job.tenant_id,
-            &job.contract_name,
-            &language.to_string(),
-            &report_json,
-            total as i32,
-            high as i32,
-            medium as i32,
+            BadgeIssueParams {
+                audit_id,
+                tenant_id: job.tenant_id,
+                contract_name: &job.contract_name,
+                chain: &chain,
+                report_json: &report_json,
+                vulnerability_count: total as i32,
+                high_severity_count: high as i32,
+                medium_severity_count: medium as i32,
+            },
         )
         .await
         .ok();

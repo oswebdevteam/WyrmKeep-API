@@ -2,9 +2,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ContractLanguage {
+    #[default]
     Solidity,
     Rust,
     Move,
@@ -43,12 +44,6 @@ impl std::str::FromStr for ContractLanguage {
             "quorlin" | "kortana" => Ok(Self::Quorlin),
             _ => Err(format!("Unsupported language: {}. Supported: solidity, rust, move, cairo, aiken, compact, quorlin", s)),
         }
-    }
-}
-
-impl Default for ContractLanguage {
-    fn default() -> Self {
-        Self::Solidity
     }
 }
 

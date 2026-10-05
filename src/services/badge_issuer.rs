@@ -6,18 +6,33 @@ use crate::models::badge::AuditGrade;
 
 pub struct BadgeIssuer;
 
+#[derive(Debug, Clone, Copy)]
+pub struct BadgeIssueParams<'a> {
+    pub audit_id: Uuid,
+    pub tenant_id: Uuid,
+    pub contract_name: &'a str,
+    pub chain: &'a str,
+    pub report_json: &'a serde_json::Value,
+    pub vulnerability_count: i32,
+    pub high_severity_count: i32,
+    pub medium_severity_count: i32,
+}
+
 impl BadgeIssuer {
     pub async fn issue(
         pool: &sqlx::PgPool,
-        audit_id: Uuid,
-        tenant_id: Uuid,
-        contract_name: &str,
-        chain: &str,
-        report_json: &serde_json::Value,
-        vulnerability_count: i32,
-        high_severity_count: i32,
-        medium_severity_count: i32,
+        params: BadgeIssueParams<'_>,
     ) -> Result<Uuid, AppError> {
+        let BadgeIssueParams {
+            audit_id,
+            tenant_id,
+            contract_name,
+            chain,
+            report_json,
+            vulnerability_count,
+            high_severity_count,
+            medium_severity_count,
+        } = params;
         let grade = AuditGrade::from_counts(
             high_severity_count as usize,
             medium_severity_count as usize,
@@ -58,7 +73,7 @@ impl BadgeIssuer {
         .bind(audit_id)
         .bind(tenant_id)
         .bind(contract_name)
-        .bind(certificate_hash.clone())
+        .bind(certificate_hash)
         .bind(grade.to_string())
         .bind(vulnerability_count)
         .bind(high_severity_count)
