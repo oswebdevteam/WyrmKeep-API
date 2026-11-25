@@ -29,11 +29,9 @@ impl AuditPipeline {
             }
         };
 
-        sqlx::query!(
-            "UPDATE audits SET status = $1 WHERE id = $2",
-            AuditStatus::Running.as_ref(),
-            audit_id
-        )
+        sqlx::query("UPDATE audits SET status = $1 WHERE id = $2")
+        .bind(AuditStatus::Running.as_ref())
+        .bind(audit_id)
         .execute(&self.state.pool)
         .await?;
 
@@ -224,12 +222,12 @@ impl AuditPipeline {
         let final_report_json = serde_json::to_value(&final_report)
             .map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
 
-        sqlx::query!(
-            "UPDATE audits SET report = $1, status = $2, completed_at = NOW() WHERE id = $3",
-            final_report_json,
-            AuditStatus::Complete.as_ref(),
-            audit_id
+        sqlx::query(
+            "UPDATE audits SET report = $1, status = $2, completed_at = NOW() WHERE id = $3"
         )
+        .bind(final_report_json)
+        .bind(AuditStatus::Complete.as_ref())
+        .bind(audit_id)
         .execute(&self.state.pool)
         .await?;
 
@@ -249,12 +247,10 @@ impl AuditPipeline {
     }
 
     pub async fn fail_audit(&self, audit_id: Uuid, error_msg: &str) -> Result<(), crate::error::AppError> {
-        sqlx::query!(
-            "UPDATE audits SET status = $1, error_message = $2 WHERE id = $3",
-            AuditStatus::Failed.as_ref(),
-            error_msg,
-            audit_id
-        )
+        sqlx::query("UPDATE audits SET status = $1, error_message = $2 WHERE id = $3")
+        .bind(AuditStatus::Failed.as_ref())
+        .bind(error_msg)
+        .bind(audit_id)
         .execute(&self.state.pool)
         .await?;
 

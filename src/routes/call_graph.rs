@@ -22,18 +22,16 @@ pub async fn get_call_graph(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<CallGraphResponse>, AppError> {
-    let row = sqlx::query!(
-        "SELECT report FROM audits WHERE id = $1 AND tenant_id = $2",
-        id,
-        auth.tenant_id
+    let report: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT report FROM audits WHERE id = $1 AND tenant_id = $2"
     )
+    .bind(id)
+    .bind(auth.tenant_id)
     .fetch_optional(&state.pool)
     .await?
     .ok_or_else(|| AppError::NotFound("Audit not found".into()))?;
 
-    let report = row
-        .report
-        .ok_or_else(|| AppError::NotFound("Report not ready yet".into()))?;
+    let report = report.ok_or_else(|| AppError::NotFound("Report not ready yet".into()))?;
 
     let call_graph = report
         .get("call_graph")

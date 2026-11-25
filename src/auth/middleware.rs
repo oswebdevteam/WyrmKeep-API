@@ -68,10 +68,10 @@ impl FromRequestParts<AppState> for AuthUser {
 
             let tenant_id = Uuid::parse_str(tenant_id_str).map_err(|_| AppError::Unauthorized)?;
 
-            let tenant_hash: Option<String> = sqlx::query_scalar!(
-                "SELECT api_key_hash FROM tenants WHERE id = $1",
-                tenant_id
+            let tenant_hash: Option<String> = sqlx::query_scalar(
+                "SELECT api_key_hash FROM tenants WHERE id = $1"
             )
+            .bind(tenant_id)
             .fetch_optional(&state.pool)
             .await?;
 

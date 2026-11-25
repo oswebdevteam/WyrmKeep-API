@@ -48,32 +48,25 @@ pub async fn create_tenant(
 
     let tenant_id = Uuid::new_v4();
 
-    let tenant = sqlx::query!(
+    let tenant = sqlx::query_as::<_, Tenant>(
         r#"
         INSERT INTO tenants (id, name, api_key_hash)
         VALUES ($1, $2, $3)
         RETURNING id, name, api_key_hash, created_at
-        "#,
-        tenant_id,
-        payload.name,
-        api_key_hash
+        "#
     )
+    .bind(tenant_id)
+    .bind(&payload.name)
+    .bind(&api_key_hash)
     .fetch_one(&state.pool)
     .await?;
 
     let session_token = encode_token(tenant_id, "tenant", &state.config.jwt_secret)?;
 
-    let tenant_model = Tenant {
-        id: tenant.id,
-        name: tenant.name,
-        api_key_hash: tenant.api_key_hash,
-        created_at: tenant.created_at,
-    };
-
     Ok((
         StatusCode::CREATED,
         Json(CreateTenantResponse {
-            data: tenant_model,
+            data: tenant,
             api_key: payload.raw_api_key,
             session_token,
             request_id: Uuid::new_v4().to_string(),
@@ -85,27 +78,20 @@ pub async fn get_me(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<TenantResponse>, AppError> {
-    let tenant = sqlx::query!(
+    let tenant = sqlx::query_as::<_, Tenant>(
         r#"
         SELECT id, name, api_key_hash, created_at
         FROM tenants
         WHERE id = $1
-        "#,
-        auth.tenant_id
+        "#
     )
+    .bind(auth.tenant_id)
     .fetch_optional(&state.pool)
     .await?
     .ok_or_else(|| AppError::NotFound("Tenant not found".into()))?;
 
-    let tenant_model = Tenant {
-        id: tenant.id,
-        name: tenant.name,
-        api_key_hash: tenant.api_key_hash,
-        created_at: tenant.created_at,
-    };
-
     Ok(Json(TenantResponse {
-        data: tenant_model,
+        data: tenant,
         request_id: Uuid::new_v4().to_string(),
     }))
 }

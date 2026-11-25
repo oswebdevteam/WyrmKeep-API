@@ -67,25 +67,23 @@ pub async fn create_audit(
     auth: AuthUser,
     Json(payload): Json<CreateAuditRequest>,
 ) -> Result<(StatusCode, Json<CreateAuditResponse>), AppError> {
-    let contract = sqlx::query!(
-        "SELECT name, source_code, language FROM contracts WHERE id = $1 AND tenant_id = $2",
-        payload.contract_id,
-        auth.tenant_id
+    let (contract_name, source_code, language): (String, String, String) = sqlx::query_as(
+        "SELECT name, source_code, language FROM contracts WHERE id = $1 AND tenant_id = $2"
     )
+    .bind(payload.contract_id)
+    .bind(auth.tenant_id)
     .fetch_optional(&state.pool)
     .await?
     .ok_or_else(|| AppError::NotFound("Contract not found".into()))?;
 
-    let row = sqlx::query!(
-        "INSERT INTO audits (tenant_id, contract_id, status) VALUES ($1, $2, $3) RETURNING id",
-        auth.tenant_id,
-        payload.contract_id,
-        AuditStatus::Queued.as_ref()
+    let audit_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO audits (tenant_id, contract_id, status) VALUES ($1, $2, $3) RETURNING id"
     )
+    .bind(auth.tenant_id)
+    .bind(payload.contract_id)
+    .bind(AuditStatus::Queued.as_ref())
     .fetch_one(&state.pool)
     .await?;
-
-    let audit_id = row.id;
 
     let (tx, _) = broadcast::channel(100);
     state.audit_events.insert(audit_id, tx);
@@ -94,9 +92,9 @@ pub async fn create_audit(
         id: audit_id,
         tenant_id: auth.tenant_id,
         contract_id: payload.contract_id,
-        contract_name: contract.name,
-        source_code: contract.source_code,
-        language: contract.language,
+        contract_name,
+        source_code,
+        language,
         vuln_class_tags: payload.vuln_class_tags,
     };
 
@@ -119,17 +117,17 @@ pub async fn stream_audit(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Sse<Box<dyn tokio_stream::Stream<Item = Result<Event, Infallible>> + Send + Unpin>>, AppError> {
-    let row = sqlx::query!(
-        "SELECT id, status FROM audits WHERE id = $1 AND tenant_id = $2",
-        id,
-        auth.tenant_id
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM audits WHERE id = $1 AND tenant_id = $2"
     )
+    .bind(id)
+    .bind(auth.tenant_id)
     .fetch_optional(&state.pool)
     .await?
     .ok_or_else(|| AppError::NotFound("Audit not found".into()))?;
 
     let stream: Box<dyn tokio_stream::Stream<Item = Result<Event, Infallible>> + Send + Unpin> =
-        match row.status.as_str() {
+        match status.as_str() {
             "complete" => {
                 let event = AuditEvent::ReportReady { audit_id: id };
                 let data = serde_json::to_string(&event).unwrap();
@@ -168,10 +166,10 @@ pub async fn stream_audit(
                 } else {
                     tokio::time::sleep(Duration::from_millis(500)).await;
 
-                    let final_status = sqlx::query_scalar!(
-                        "SELECT status FROM audits WHERE id = $1",
-                        id
+                    let final_status: String = sqlx::query_scalar(
+                        "SELECT status FROM audits WHERE id = $1"
                     )
+                    .bind(id)
                     .fetch_one(&state.pool)
                     .await
                     .unwrap_or_else(|_| "failed".to_string());
@@ -200,11 +198,11 @@ pub async fn get_report(
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let report = sqlx::query_scalar!(
-        "SELECT report FROM audits WHERE id = $1 AND tenant_id = $2",
-        id,
-        auth.tenant_id
+    let report: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT report FROM audits WHERE id = $1 AND tenant_id = $2"
     )
+    .bind(id)
+    .bind(auth.tenant_id)
     .fetch_optional(&state.pool)
     .await?
     .ok_or_else(|| AppError::NotFound("Audit not found".into()))?;
@@ -224,8 +222,7 @@ pub async fn list_audits(
     let limit = query.limit.unwrap_or(20);
 
     let rows = if let Some(after) = query.after {
-        sqlx::query_as!(
-            AuditListRow,
+        sqlx::query_as::<_, AuditListRow>(
             r#"
             SELECT a.id, a.contract_id, c.name as contract_name, a.status, a.created_at
             FROM audits a
@@ -233,16 +230,15 @@ pub async fn list_audits(
             WHERE a.tenant_id = $1 AND a.id > $2
             ORDER BY a.id ASC
             LIMIT $3
-            "#,
-            auth.tenant_id,
-            after,
-            limit + 1
+            "#
         )
+        .bind(auth.tenant_id)
+        .bind(after)
+        .bind(limit + 1)
         .fetch_all(&state.pool)
         .await?
     } else {
-        sqlx::query_as!(
-            AuditListRow,
+        sqlx::query_as::<_, AuditListRow>(
             r#"
             SELECT a.id, a.contract_id, c.name as contract_name, a.status, a.created_at
             FROM audits a
@@ -250,10 +246,10 @@ pub async fn list_audits(
             WHERE a.tenant_id = $1
             ORDER BY a.id ASC
             LIMIT $2
-            "#,
-            auth.tenant_id,
-            limit + 1
+            "#
         )
+        .bind(auth.tenant_id)
+        .bind(limit + 1)
         .fetch_all(&state.pool)
         .await?
     };

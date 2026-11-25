@@ -65,7 +65,7 @@ pub struct AuditReport {
     pub chain: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AuditListRow {
     pub id: Uuid,
     pub contract_id: Uuid,
